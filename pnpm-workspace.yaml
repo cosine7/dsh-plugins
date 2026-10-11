@@ -1,0 +1,36 @@
+packages:
+  - packages/*
+
+saveExact: true
+catalog:
+  "@types/node": 24.19.2
+  "@types/luxon": 3.7.6
+  typescript: 7.0.2
+  tsdown: 0.23.1
+  oxlint: 1.87.0
+  oxfmt: 0.72.0
+  oxlint-tsgolint: 7.0.2004
+  "@deepseek-ai/cordis": 4.0.4
+  "@deepseek-ai/dsh-agent": 0.2.0-rc.2
+  "@deepseek-ai/dsh-home-paths": 0.2.0-rc.2
+  "@deepseek-ai/dsh-llm": 0.2.0-rc.2
+  "@deepseek-ai/dsh-session": 0.2.0-rc.2
+  "@deepseek-ai/dsh-session-persistence": 0.2.0-rc.2
+  "@deepseek-ai/dsh-skill": 0.2.0-rc.2
+  "@deepseek-ai/dsh-tools": 0.2.0-rc.2
+  "@deepseek-ai/dsh-util-values": 0.2.0-rc.2
+  "@deepseek-ai/dsh-workspace": 0.2.0-rc.2
+
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - "@oxlint-tsgolint/darwin-arm64@7.0.2004"
+  - "@oxlint-tsgolint/darwin-x64@7.0.2004"
+  - "@oxlint-tsgolint/linux-arm64@7.0.2004"
+  - "@oxlint-tsgolint/linux-x64@7.0.2004"
+  - "@oxlint-tsgolint/win32-arm64@7.0.2004"
+  - "@oxlint-tsgolint/win32-x64@7.0.2004"
+  - oxlint-tsgolint@7.0.2004
+  - rolldown-plugin-dts@0.28.7
+  - tsdown@0.23.1

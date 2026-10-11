@@ -1,0 +1,3 @@
+- insert:
+    - id: cosine-task-center
+      name: "@cosine/dsh-task-center"

@@ -1,0 +1,36 @@
+{
+  "name": "@cosine/dsh-plugins",
+  "private": true,
+  "description": "按个人工作流定制并持续维护的 DeepSeek Harness 插件集合",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "dev": "pnpm --parallel -r run dev",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm run build && pnpm -r run test",
+    "lint": "oxlint --deny-warnings",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run fmt:check && pnpm run test"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^24.0.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "pnpm@12.11.2"
+}
