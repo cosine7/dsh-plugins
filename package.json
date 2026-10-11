@@ -4,23 +4,31 @@
   "description": "按个人工作流定制并持续维护的 DeepSeek Harness 插件集合",
   "type": "module",
   "scripts": {
+    "prepare": "simple-git-hooks",
     "build": "pnpm -r run build",
     "dev": "pnpm --parallel -r run dev",
     "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm run build && pnpm -r run test",
+    "test": "pnpm -r run test",
+    "test:watch": "pnpm --parallel -r run test:watch",
     "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run fmt:check && pnpm run test"
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run fmt:check && pnpm run test && pnpm run build"
   },
   "devDependencies": {
-    "@types/node": "catalog:",
-    "oxfmt": "catalog:",
-    "oxlint": "catalog:",
-    "oxlint-tsgolint": "catalog:",
-    "tsdown": "catalog:",
-    "typescript": "catalog:"
+    "@types/node": "^24.19.2",
+    "oxfmt": "^0.72.0",
+    "oxlint": "^1.87.0",
+    "oxlint-tsgolint": "^7.0.2004",
+    "simple-git-hooks": "^2.14.0",
+    "tsdown": "^0.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "pnpm check",
+    "preserveUnused": true
   },
   "devEngines": {
     "runtime": {

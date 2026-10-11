@@ -1,17 +1,17 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { normalizeRule, preview, latestOccurrence, nextOccurrence } from "../dist/rules.js";
+import { test, expect } from "vitest";
+import { normalizeRule, preview, latestOccurrence, nextOccurrence } from "../src/rules.js";
+import type { Rule } from "../src/types.js";
 import { Settings } from "luxon";
 
 test("once preserves local offset across normalization and JSON reload without changing instant", () => {
   const r = normalizeRule({ kind: "once", at: "2026-09-10T15:27:00+08:00" });
-  assert.equal(r.at, "2026-09-10T07:27:00.000Z");
+  if (r.kind !== "once") throw new Error("Expected one-shot rule");
+  expect(r.at).toBe("2026-09-10T07:27:00.000Z");
   const restored = normalizeRule(JSON.parse(JSON.stringify(r)));
-  assert.equal(
-    preview(restored, Date.parse("2026-09-10T07:26:00Z"))[0].local,
+  expect(preview(restored, Date.parse("2026-09-10T07:26:00Z"))[0].local).toBe(
     "2026-09-10T15:27:00.000+08:00",
   );
-  assert.equal(nextOccurrence(restored, 0), Date.parse(r.at));
+  expect(nextOccurrence(restored, 0)).toBe(Date.parse(r.at));
 });
 test("interval retains fractional negative offset and supports explicit named timezone", () => {
   const r = normalizeRule({
@@ -19,24 +19,25 @@ test("interval retains fractional negative offset and supports explicit named ti
     anchor: "2026-09-10T09:00:00-03:30",
     every_minutes: 20,
   });
-  assert.equal(preview(r, Date.parse(r.anchor))[0].local, "2026-09-10T09:20:00.000-03:30");
+  if (r.kind !== "interval") throw new Error("Expected interval rule");
+  expect(preview(r, Date.parse(r.anchor))[0].local).toBe("2026-09-10T09:20:00.000-03:30");
   const explicit = normalizeRule({
     kind: "once",
     at: "2026-09-10T07:27:00Z",
     timezone: "Asia/Shanghai",
   });
-  assert.equal(preview(explicit, 0)[0].local, "2026-09-10T15:27:00.000+08:00");
-  assert.throws(() => normalizeRule({ ...explicit, timezone: "bad-zone" }));
+  expect(preview(explicit, 0)[0].local).toBe("2026-09-10T15:27:00.000+08:00");
+  expect(() => normalizeRule({ ...explicit, timezone: "bad-zone" })).toThrow();
 });
 test("legacy rules without timezone use host local display; new interval persists host zone", () => {
   const original = Settings.defaultZone;
   try {
     Settings.defaultZone = "Asia/Shanghai";
-    const legacy = { kind: "once", at: "2026-09-10T07:27:00.000Z" };
-    assert.equal(preview(legacy, 0)[0].local, "2026-09-10T15:27:00.000+08:00");
+    const legacy: Rule = { kind: "once", at: "2026-09-10T07:27:00.000Z" };
+    expect(preview(legacy, 0)[0].local).toBe("2026-09-10T15:27:00.000+08:00");
     const r = normalizeRule({ kind: "interval", every_minutes: 20 }, Date.parse(legacy.at));
-    assert.equal(r.timezone, "Asia/Shanghai");
-    assert.equal(preview(r, Date.parse(legacy.at))[0].local, "2026-09-10T15:47:00.000+08:00");
+    expect(r.timezone).toBe("Asia/Shanghai");
+    expect(preview(r, Date.parse(legacy.at))[0].local).toBe("2026-09-10T15:47:00.000+08:00");
   } finally {
     Settings.defaultZone = original;
   }
@@ -54,8 +55,8 @@ const sample = {
 };
 test("morning and afternoon independently align to starts, skip lunch and weekend", () => {
   const r = normalizeRule(sample);
-  const values = preview(r, ms("2026-09-11T09:30:00+08:00"), 13).map((x) => x.local.slice(0, 16));
-  assert.deepEqual(values, [
+  const values = preview(r, ms("2026-09-11T09:30:00+08:00"), 13).map((x) => x.local!.slice(0, 16));
+  expect(values).toEqual([
     "2026-09-11T09:31",
     "2026-09-11T09:51",
     "2026-09-11T10:11",
@@ -78,13 +79,11 @@ test("exclude dates, date bounds and overlapping windows", () => {
     exclude_dates: ["2026-09-11"],
     end_date: "2026-09-14",
   });
-  assert.equal(
-    preview(r, ms("2026-09-11T00:00:00+08:00"))[0].local.slice(0, 16),
+  expect(preview(r, ms("2026-09-11T00:00:00+08:00"))[0].local!.slice(0, 16)).toBe(
     "2026-09-14T09:31",
   );
-  assert.equal(nextOccurrence(r, ms("2026-09-14T11:30:00+08:00")), null);
-  assert.equal(
-    latestOccurrence(r, ms("2026-09-14T10:15:00+08:00")),
+  expect(nextOccurrence(r, ms("2026-09-14T11:30:00+08:00"))).toBe(null);
+  expect(latestOccurrence(r, ms("2026-09-14T10:15:00+08:00"))).toBe(
     ms("2026-09-14T10:11:00+08:00"),
   );
 });
@@ -94,17 +93,15 @@ test("interval remains anchor aligned and coalesces long absences", () => {
     every_minutes: 20,
     anchor: "2026-09-10T09:31:00+08:00",
   });
-  assert.equal(nextOccurrence(r, ms("2026-09-10T09:31:00+08:00")), ms("2026-09-10T09:51:00+08:00"));
-  assert.equal(
-    latestOccurrence(r, ms("2026-09-10T10:30:00+08:00")),
+  expect(nextOccurrence(r, ms("2026-09-10T09:31:00+08:00"))).toBe(ms("2026-09-10T09:51:00+08:00"));
+  expect(latestOccurrence(r, ms("2026-09-10T10:30:00+08:00"))).toBe(
     ms("2026-09-10T10:11:00+08:00"),
   );
 });
 test("cron month end and weekday, exact latest boundary", () => {
   const r = normalizeRule({ kind: "cron", timezone: "Asia/Shanghai", expression: "0 20 L * *" });
-  assert.equal(preview(r, ms("2026-02-01T00:00:00Z"))[0].local.slice(0, 16), "2026-02-28T20:00");
-  assert.equal(
-    latestOccurrence(r, ms("2026-02-28T20:00:00+08:00")),
+  expect(preview(r, ms("2026-02-01T00:00:00Z"))[0].local!.slice(0, 16)).toBe("2026-02-28T20:00");
+  expect(latestOccurrence(r, ms("2026-02-28T20:00:00+08:00"))).toBe(
     ms("2026-02-28T20:00:00+08:00"),
   );
 });
@@ -118,21 +115,20 @@ test("invalid and ambiguous inputs rejected", () => {
     { kind: "cron", timezone: "UTC", expression: "0 0 1 * 1" },
     { ...sample, extra: 1 },
   ])
-    assert.throws(() => normalizeRule(rule));
+    expect(() => normalizeRule(rule)).toThrow();
 });
 test("DST missing local time skipped, repeated local time delivered only once", () => {
-  const make = (time) =>
+  const make = (time: string) =>
     normalizeRule({
       kind: "windows",
       timezone: "America/New_York",
       weekdays: [7],
       windows: [{ start: time, end: time, every_minutes: 1 }],
     });
-  assert.equal(
-    preview(make("02:30"), ms("2026-03-08T00:00:00-05:00"), 1)[0].local.slice(0, 10),
+  expect(preview(make("02:30"), ms("2026-03-08T00:00:00-05:00"), 1)[0].local!.slice(0, 10)).toBe(
     "2026-03-15",
   );
   const r = make("01:30");
-  assert.equal(nextOccurrence(r, ms("2026-11-01T00:00:00-04:00")), ms("2026-11-01T01:30:00-04:00"));
-  assert.equal(nextOccurrence(r, ms("2026-11-01T01:30:00-04:00")), ms("2026-11-08T01:30:00-05:00"));
+  expect(nextOccurrence(r, ms("2026-11-01T00:00:00-04:00"))).toBe(ms("2026-11-01T01:30:00-04:00"));
+  expect(nextOccurrence(r, ms("2026-11-01T01:30:00-04:00"))).toBe(ms("2026-11-08T01:30:00-05:00"));
 });

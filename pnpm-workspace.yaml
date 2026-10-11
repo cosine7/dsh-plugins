@@ -1,15 +1,7 @@
 packages:
   - packages/*
 
-saveExact: true
 catalog:
-  "@types/node": 24.19.2
-  "@types/luxon": 3.7.6
-  typescript: 7.0.2
-  tsdown: 0.23.1
-  oxlint: 1.87.0
-  oxfmt: 0.72.0
-  oxlint-tsgolint: 7.0.2004
   "@deepseek-ai/cordis": 4.0.4
   "@deepseek-ai/dsh-agent": 0.2.0-rc.2
   "@deepseek-ai/dsh-home-paths": 0.2.0-rc.2
@@ -23,6 +15,7 @@ catalog:
 
 allowBuilds:
   esbuild: true
+  simple-git-hooks: false
 
 minimumReleaseAgeExclude:
   - "@oxlint-tsgolint/darwin-arm64@7.0.2004"

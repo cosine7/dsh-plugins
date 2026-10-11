@@ -25,12 +25,13 @@
     "build": "tsdown",
     "dev": "tsdown --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:host": "node scripts/verify-host.mjs"
   },
   "dependencies": {
-    "cron-parser": "5.10.2",
-    "luxon": "3.7.2"
+    "cron-parser": "^5.10.2",
+    "luxon": "^3.7.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
@@ -43,7 +44,7 @@
     "@deepseek-ai/dsh-tools": "catalog:",
     "@deepseek-ai/dsh-util-values": "catalog:",
     "@deepseek-ai/dsh-workspace": "catalog:",
-    "@types/luxon": "catalog:"
+    "@types/luxon": "^3.7.6"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
