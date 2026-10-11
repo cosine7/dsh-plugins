@@ -1,5 +1,22 @@
 # 验证记录
 
+## Vitest 与提交检查（2026-10-11）
+
+单元测试迁移为 TypeScript，直接通过 Vitest 测试源码；根目录递归执行各子包的测试命令，无需 Vitest 配置文件。保留原有 19 项测试，全部通过。类型检查、lint、格式检查、构建与真实桌面宿主集成检查通过。
+
+根目录通过 simple-git-hooks 注册 `pre-commit`，提交前运行 `pnpm check`；`pnpm install` 的 prepare 自动安装钩子。普通工具和库使用 `^`，DSH 开发依赖保持固定版本，锁文件记录实际安装版本。
+
+真实桌面宿主检查需先构建，再从本插件目录运行以下 PowerShell 命令（在独立 PowerShell 窗口运行，结束后关闭该窗口）：
+
+```powershell
+$desktopDir = "$env:LOCALAPPDATA/Programs/DeepSeek Harness"
+$env:ELECTRON_RUN_AS_NODE = '1'
+$env:DSH_HOST_MODULES = "$desktopDir/resources/app.asar/dsh/node_modules"
+& "$desktopDir/DeepSeek Harness.exe" --expose-internals scripts/verify-host.mjs
+```
+
+该检查使用临时 DSH_HOME 与无网络模型替身，不修改日常任务库，不重启日常 DSH。
+
 ## pnpm monorepo 迁移（2026-10-11）
 
 插件版本 0.3.0，从独立 JavaScript 项目迁移到 `dsh-plugins/packages/task-center`，采用 TypeScript、tsdown、Oxlint 与 Oxfmt。仅支持桌面版 DSH 0.2.0-rc.2。保留包名、插件 ID、v1 任务存储与会话绑定，原源码目录保留用于回退。旧网页版的绑定不修改。
