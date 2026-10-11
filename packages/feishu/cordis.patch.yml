@@ -1,0 +1,3 @@
+- insert:
+    - id: cosine-feishu
+      name: "@cosine/dsh-feishu"
