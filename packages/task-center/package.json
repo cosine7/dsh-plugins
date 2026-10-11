@@ -8,8 +8,7 @@
     "dist",
     "skills",
     "cordis.patch.yml",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "type": "module",
   "main": "./dist/index.js",
