@@ -57,7 +57,23 @@ try {
     "dsh-skill",
   ])
     await ctx.plugin((await load(name)).default, {}).await();
+  // Exercise the host's one-shot migration without reading or changing user credentials.
+  const credentialsFile = path.join(root, ".credentials.yaml");
+  fs.writeFileSync(
+    credentialsFile,
+    "# pre-release fixture\nFEISHU_TEST_ID: cli_hosttest\nFEISHU_TEST_SECRET: legacy_test_secret\n",
+    { mode: 0o600 },
+  );
   await ctx.plugin((await load("dsh-credentials-local")).default, { watch: false }).await();
+  assert.match(fs.readFileSync(credentialsFile, "utf8"), /^version: 1\nrefs:/);
+  assert.equal(
+    (await ctx.credentials.resolve(credentialRef("FEISHU_TEST_ID"))).value,
+    "cli_hosttest",
+  );
+  assert.equal(
+    (await ctx.credentials.resolve(credentialRef("FEISHU_TEST_SECRET"))).value,
+    "legacy_test_secret",
+  );
   await ctx
     .plugin(
       class extends Service {
@@ -71,7 +87,7 @@ try {
     )
     .await();
   await ctx
-    .plugin((await load("dsh-session-persistence-jsonl")).default, {
+    .plugin(await load("dsh-session-persistence-jsonl"), {
       root: path.join(root, "sessions"),
       compression: "none",
     })
@@ -228,7 +244,7 @@ try {
   await b.dispose();
   assert.equal(errors.length, 0, errors.join("\n"));
   console.log(
-    "DSH desktop host integration passed: real credentials, 18 tools, skills, unique subscription, transfer, SDK callbacks, deduplication, durable inbox, archive and disposal. Feishu network simulated; no trading agent used.",
+    "DSH desktop host integration passed: credential migration, real credentials, 18 tools, skills, unique subscription, transfer, SDK callbacks, deduplication, durable inbox, archive and disposal. Feishu network simulated; no trading agent used.",
   );
 } finally {
   release?.();

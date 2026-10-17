@@ -2,7 +2,7 @@
 
 为 DeepSeek Harness 桌面版提供持久化定时任务与跨会话任务管理。每个任务绑定一个执行会话，到期后唤醒对应 Agent 处理。
 
-包名 `@cosine/dsh-task-center`，当前适配桌面版 DSH `0.2.0-rc.2`。可与官方 Schedule 插件同时使用，工具名称以 `task_center_` 开头。
+包名 `@cosine/dsh-task-center`，当前适配桌面版 DSH `0.2.1-rc.2`。可与官方 Schedule 插件同时使用，工具名称以 `task_center_` 开头。
 
 ## 能力
 

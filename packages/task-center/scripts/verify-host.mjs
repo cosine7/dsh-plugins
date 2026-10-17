@@ -56,7 +56,7 @@ try {
     )
     .await();
   await ctx
-    .plugin((await load("dsh-session-persistence-jsonl")).default, {
+    .plugin(await load("dsh-session-persistence-jsonl"), {
       root: path.join(root, "sessions"),
       compression: "none",
     })

@@ -2,6 +2,8 @@
 
 让 DeepSeek Harness 桌面版 Session 与手机飞书机器人双向通信：主动消息与卡片按钮实时唤醒订阅 Session，Session 可发送文字、确认卡片并更新处理结果。
 
+当前适配桌面版 DSH `0.2.1-rc.2`。
+
 ## 接入
 
 构建仓库后，通过 DSH 桌面 CLI 安装本地 `packages/feishu` 目录，方法见[仓库说明](../../README.md)。重启 DSH，在目标 Session 中让 Agent 读取 `dsh-feishu` skill 并配置飞书。
@@ -23,6 +25,8 @@
 ## 存储与运行
 
 应用 ID 和 secret 由 DSH `credentials` 服务管理，插件只保存引用。默认宿主凭据文件为 `$DSH_HOME/.credentials.yaml`；这是宿主的文件凭据机制，不代表 Windows 凭据保险箱加密。
+
+DSH `0.2.1-rc.2` 使用带 `version: 1`、`refs` 与 `records` 分节的凭据格式；宿主启动时自动迁移可识别的旧扁平格式，插件仍通过凭据服务读写，不自行迁移或要求重新扫码。
 
 其他数据保存在 `$DSH_HOME/storages/cosine-feishu/`，默认位于用户的 `.dsh` 目录：通道、订阅、事件、卡片、发送记录及扫码图片。与源码目录无关，不会写入交易项目。扫码链接/图片属于临时授权材料，不应公开分享该目录。
 
