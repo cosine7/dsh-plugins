@@ -11,11 +11,15 @@ description: 飞书机器人双向通道的配置、订阅、消息、确认卡�
 
 App ID 与 secret 只能由 DSH 凭据服务持有，禁止在聊天中索要/打印 secret、写入插件配置或项目文件。已有 DSH 凭据可通过 `feishu_configure` 的引用名接入。CLI 的凭据不会自动共享。
 
-接入后调用 `feishu_check`。二维码流程会申请所需权限、事件及回调；若平台仍要求配置，打开返回的控制台链接：启用机器人，授予 `im:message:send_as_bot` 和 `im:message.p2p_msg:readonly`，为事件 `im.message.receive_v1`、回调 `card.action.trigger` 分别选择长连接，并发布应用/确认可用范围。配置完成调用 `feishu_reconnect`。连接成功不代表订阅完整，需授权用户实际发送文字并点击一张测试卡片验证。
+接入后调用 `feishu_check`。二维码流程会申请所需权限、事件及回调；若平台仍要求配置，打开返回的控制台链接：启用机器人，授予 `im:message:send_as_bot`、`im:message.p2p_msg:readonly`、`im:message.reactions:write_only`，为事件 `im.message.receive_v1`、回调 `card.action.trigger` 分别选择长连接，并发布应用/确认可用范围。已有应用缺少新权限时用 update 扫码补授权，不重建应用。配置完成调用 `feishu_reconnect`。连接成功不代表订阅完整，需授权用户实际发送文字并点击一张测试卡片验证。
 
 由用户选定的 Session 调用 `feishu_subscribe`。文字与卡片点击统一投递给当前订阅者；旧卡片创建者只作为审计信息。没有订阅者时事件仍记录为 unassigned，之后订阅也不会自动补投。所有 Session 可用 `feishu_events`、`feishu_cards`、`feishu_outbound` 查看记录。归档/停止 Session 会解除订阅，应用正常退出保留绑定。
 
-使用 `feishu_send_text` 发送文字。使用 `feishu_send_card` 发送 2–6 个按钮的确认卡片，提供完整上下文与明确的 expires_at（含时区 ISO 时间）。根据业务和用户要求选有效期；不要擅自固定为30秒或24小时。平台消息更新窗口最多14天，此为技术上限。收到按钮点击只表示用户意愿；必须按收到时的市场/业务情况重新判断，插件不执行任何交易。
+使用 `feishu_send_text` 发送 Markdown 富文本，正常使用标题、加粗、列表、链接、代码块和表格，不要为了插件降级成纯文本或额外转义 Markdown。长消息自动拆分，发送记录的 message_ids 包含各段消息；部分发送失败仍视为 uncertain，不换 ID 重发。
+
+文字消息表情由插件自动管理：OK=已接收记录，Typing=对应消息正在处理，完成移除，异常或重启中断显示 CrossMark。不是业务执行成功标记，不需要 Agent 手动管理表情。任务中心会按任务关联和 revision 转交通道，不会恢复运行归档会话，也不会覆盖用户主动更改的订阅。
+
+使用 `feishu_send_card` 发送 2–6 个按钮的确认卡片，提供完整上下文与明确的 expires_at（含时区 ISO 时间）。根据业务和用户要求选有效期；不要擅自固定为30秒或24小时。平台消息更新窗口最多14天，此为技术上限。收到按钮点击只表示用户意愿；必须按收到时的市场/业务情况重新判断，插件不执行任何交易。
 
 点击后按钮会移除，状态先显示已收到/已记录，绝不等同于已执行。处理完成查询卡片 revision，再调用 `feishu_update_card` 写入真实结果，例如“条件已变，未执行”。dirty=true 表示飞书更新尚未确认，会自动重试。过期点击不投递。
 

@@ -30,6 +30,7 @@ const start = Object.getOwnPropertyDescriptor(lark.WSClient.prototype, "start");
 const close = Object.getOwnPropertyDescriptor(lark.WSClient.prototype, "close");
 const status = Object.getOwnPropertyDescriptor(lark.WSClient.prototype, "getConnectionStatus");
 const adapter = lark.defaultHttpInstance.defaults.adapter;
+const requests = [];
 lark.WSClient.prototype.start = async function (options) {
   dispatcher = options.eventDispatcher;
 };
@@ -37,16 +38,20 @@ lark.WSClient.prototype.close = function () {};
 lark.WSClient.prototype.getConnectionStatus = function () {
   return { state: "connected" };
 };
-lark.defaultHttpInstance.defaults.adapter = async (config) => ({
-  config,
-  status: 200,
-  statusText: "OK",
-  headers: {},
-  data: config.url.includes("token")
-    ? { code: 0, tenant_access_token: "fake", app_access_token: "fake", expire: 7200 }
-    : { code: 0, data: { message_id: "om_host_card" } },
-});
+lark.defaultHttpInstance.defaults.adapter = async (config) => {
+  requests.push({ url: config.url, method: config.method, data: config.data });
+  return {
+    config,
+    status: 200,
+    statusText: "OK",
+    headers: {},
+    data: config.url.includes("token")
+      ? { code: 0, tenant_access_token: "fake", app_access_token: "fake", expire: 7200 }
+      : { code: 0, data: { message_id: "om_host_card", reaction_id: "reaction_host" } },
+  };
+};
 let release;
+let releaseText;
 try {
   for (const name of [
     "dsh-session",
@@ -174,11 +179,7 @@ try {
   assert.equal(moved.session_id, "feishu-B");
   const activity = (id) =>
     ctx.waterfall("workspace/session-activity", { sessionId: id }, () => Promise.resolve([]));
-  assert(
-    (await activity("feishu-B")).some((e) =>
-      e.items.some((item) => item.id === `feishu:${channel.id}`),
-    ),
-  );
+  assert(!(await activity("feishu-B")).some((e) => e.kind === "schedule"));
   const barrier = new Promise((resolve) => {
     release = resolve;
   });
@@ -232,11 +233,75 @@ try {
   assert(
     fs.readFileSync(path.join(root, ".credentials.yaml"), "utf8").includes("host_test_secret"),
   );
-  await ctx.parallel("workspace/session-stop", { sessionId: "feishu-B" });
-  assert(!(await invoke(a.agent, "feishu_status"))[0].session_id);
   b.agent.cancel({ kind: "user" });
   release();
   await b.agent.whenIdle();
+  const textBarrier = new Promise((resolve) => {
+    releaseText = resolve;
+  });
+  b.agent.ctx.on("agent/pre-step", async (_proposal, next) => {
+    await textBarrier;
+    return next();
+  });
+  await invoke(b.agent, "feishu_send_text", {
+    channel_id: channel.id,
+    text: "# 标题\n**加粗**\n```ts\nconst x = 1;\n```\n后文",
+    request_id: "markdown_host",
+  });
+  const markdown = requests.find(
+    (r) => r.method === "post" && JSON.parse(r.data || "{}").uuid === "markdown_host",
+  );
+  assert.equal(JSON.parse(markdown.data).msg_type, "post");
+  assert.equal(JSON.parse(JSON.parse(markdown.data).content).zh_cn.content.length, 3);
+  await dispatcher.invoke(
+    {
+      schema: "2.0",
+      header: { event_type: "im.message.receive_v1", event_id: "processing_test" },
+      event: {
+        sender: { sender_type: "user", sender_id: { open_id: "ou_host" } },
+        message: {
+          message_type: "text",
+          message_id: "om_processing",
+          chat_id: "oc_host",
+          chat_type: "p2p",
+          content: '{"text":"processing status"}',
+        },
+      },
+    },
+    { needCheck: false },
+  );
+  const wait = async (predicate) => {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (await predicate()) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.fail(
+      `Processing status did not converge: ${JSON.stringify(await invoke(a.agent, "feishu_events"))}; turns=${JSON.stringify(
+        b.agent.session
+          .ownEvents()
+          .filter((e) => e.type === "turn/end")
+          .map((e) => e.data),
+      )}`,
+    );
+  };
+  await wait(async () =>
+    (await invoke(a.agent, "feishu_events")).some(
+      (e) => e.message_id === "om_processing" && e.processing?.emoji === "Typing",
+    ),
+  );
+  releaseText();
+  await b.agent.whenIdle();
+  await wait(async () =>
+    (await invoke(a.agent, "feishu_events")).some(
+      (e) =>
+        e.message_id === "om_processing" &&
+        e.processing?.state === "failed" &&
+        e.processing.emoji === "CrossMark",
+    ),
+  );
+  await ctx.parallel("workspace/session-stop", { sessionId: "feishu-B" });
+  assert(!(await invoke(a.agent, "feishu_status"))[0].session_id);
   await fork.dispose();
   assert(!fs.existsSync(path.join(root, "storages/cosine-feishu/owner.lock")));
   assert(!a.agent.ctx.tools.schemas(a.agent).some((t) => t.name.startsWith("feishu_")));
@@ -244,10 +309,11 @@ try {
   await b.dispose();
   assert.equal(errors.length, 0, errors.join("\n"));
   console.log(
-    "DSH desktop host integration passed: credential migration, real credentials, 18 tools, skills, unique subscription, transfer, SDK callbacks, deduplication, durable inbox, archive and disposal. Feishu network simulated; no trading agent used.",
+    "DSH desktop host integration passed: credentials, 18 tools, subscription, callbacks, deduplication, durable inbox, Markdown post, real claimed/turn-end reactions, archive and disposal. Feishu network simulated; no trading agent used.",
   );
 } finally {
   release?.();
+  releaseText?.();
   await ctx.fiber.dispose();
   Object.defineProperty(lark.WSClient.prototype, "start", start);
   Object.defineProperty(lark.WSClient.prototype, "close", close);

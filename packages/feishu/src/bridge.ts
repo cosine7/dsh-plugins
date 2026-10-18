@@ -25,6 +25,7 @@ export class Bridge<A extends MaintenanceAgent> {
     this.signalStop = resolve;
   });
   onCardsChanged: () => void = () => {};
+  onProcessingChanged: () => void = () => {};
 
   constructor(
     readonly store: Store,
@@ -105,6 +106,7 @@ export class Bridge<A extends MaintenanceAgent> {
       throw new Error("通道已有订阅者，请明确调用 feishu_transfer 转交。");
     this.store.transaction(() => {
       channel.session_id = sessionId;
+      delete channel.archived_subscription;
       channel.revision++;
     });
     this.kick();
@@ -115,6 +117,7 @@ export class Bridge<A extends MaintenanceAgent> {
     this.checkRevision(channel, revision);
     this.store.transaction((data) => {
       delete channel.session_id;
+      delete channel.archived_subscription;
       channel.revision++;
       for (const event of data.events)
         if (event.channel_id === id && event.state === "pending") event.state = "unassigned";
@@ -123,8 +126,90 @@ export class Bridge<A extends MaintenanceAgent> {
   }
   stopSession(sessionId: string) {
     for (const channel of this.store.data.channels) {
-      if (channel.session_id === sessionId) this.unsubscribe(channel.id, channel.revision);
+      if (channel.session_id === sessionId) {
+        this.store.transaction((data) => {
+          channel.archived_subscription = { session_id: sessionId, revision: channel.revision };
+          delete channel.session_id;
+          channel.revision++;
+          for (const event of data.events)
+            if (event.channel_id === channel.id && event.state === "pending")
+              event.state = "unassigned";
+        });
+      }
     }
+  }
+  bindings(sessionId: string) {
+    return this.store.data.channels
+      .filter((c) => c.enabled && c.session_id === sessionId)
+      .map((c) => ({ channel_id: c.id, session_id: sessionId, revision: c.revision }));
+  }
+  handoff(
+    bindings: { channel_id: string; session_id: string; revision: number }[],
+    target: string,
+  ) {
+    if (!this.host.get(target)) throw new Error("飞书转交目标尚未加载或已归档。");
+    this.store.transaction(() => {
+      for (const binding of bindings) {
+        const channel = this.channel(binding.channel_id);
+        const matches =
+          channel.enabled &&
+          ((channel.session_id === binding.session_id && channel.revision === binding.revision) ||
+            (!channel.session_id &&
+              channel.archived_subscription?.session_id === binding.session_id &&
+              channel.archived_subscription.revision === binding.revision &&
+              channel.revision === binding.revision + 1));
+        // Recover a crash after the channel commit and before the task commit, without stealing later changes.
+        const recovered =
+          channel.enabled &&
+          channel.session_id === target &&
+          (channel.revision === binding.revision + 1 || channel.revision === binding.revision + 2);
+        if (!matches && !recovered)
+          throw new Error("关联的飞书订阅已被主动修改，请重新关联任务；不会覆盖当前订阅。");
+      }
+      for (const binding of bindings) {
+        const channel = this.channel(binding.channel_id);
+        if (channel.session_id !== target) {
+          channel.session_id = target;
+          channel.revision++;
+          delete channel.archived_subscription;
+        }
+      }
+    });
+    this.kick();
+    return bindings.map((b) => ({
+      channel_id: b.channel_id,
+      session_id: target,
+      revision: this.channel(b.channel_id).revision,
+    }));
+  }
+
+  processing(
+    eventId: string,
+    state: "received" | "running" | "completed" | "failed" | "interrupted",
+    sessionId?: string,
+    turn?: number,
+  ) {
+    const event = this.store.data.events.find((e) => e.id === eventId && e.kind === "text");
+    if (!event) return;
+    this.store.transaction(() => {
+      event.processing = {
+        ...event.processing,
+        state,
+        dirty: true,
+        ...(sessionId ? { session_id: sessionId } : {}),
+        ...(turn !== undefined ? { turn } : {}),
+      };
+    });
+    this.onProcessingChanged();
+  }
+  finishTurn(sessionId: string, turn: number, completed: boolean) {
+    for (const event of this.store.data.events.filter(
+      (e) =>
+        e.processing?.session_id === sessionId &&
+        e.processing.turn === turn &&
+        e.processing.state === "running",
+    ))
+      this.processing(event.id, completed ? "completed" : "failed");
   }
   enable(id: string, revision: unknown, enabled: boolean): Channel {
     const channel = this.channel(id);
@@ -167,9 +252,11 @@ export class Bridge<A extends MaintenanceAgent> {
         chat_id: message.chatId,
         text: message.text.slice(0, 32000),
         state: channel.session_id ? "pending" : "unassigned",
+        processing: { state: "received", dirty: true },
       });
     });
     this.kick();
+    this.onProcessingChanged();
     return true;
   }
 
@@ -412,6 +499,7 @@ export class Bridge<A extends MaintenanceAgent> {
             this.host.deliver(
               agent,
               `[Feishu ${event.kind === "card" ? "卡片确认" : "用户消息"}]\n通道：${current.label}\n通道 ID：${current.id}\n事件 ID：${event.id}\n消息 ID：${event.message_id}\n收到时间：${new Date(event.received_at).toISOString()}\n${event.card_id ? `卡片 ID：${event.card_id}\n` : ""}\n${event.text}\n\n请处理用户消息并通过飞书通道回复。卡片点击只表达用户意愿，任何实际操作都必须由你按当前情况重新判断。`,
+              event,
             );
             if (!(await this.host.flush(agent))) throw new Error("投递持久化未确认。");
             this.store.transaction((data) => {

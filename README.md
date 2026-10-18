@@ -6,8 +6,8 @@
 
 | 插件                                          | 功能                                                |
 | --------------------------------------------- | --------------------------------------------------- |
-| [Task Center](packages/task-center/README.md) | 持久化定时任务、时间规则预览与跨会话任务转交        |
-| [飞书通道](packages/feishu/README.md)         | 飞书文字与确认卡片、长连接收事件和唯一 Session 订阅 |
+| [Task Center](packages/task-center/README.md) | 持久化定时任务、会话创建与恢复、任务及关联订阅转交  |
+| [飞书通道](packages/feishu/README.md)         | Markdown 消息、确认卡片、处理状态表情与实时会话投递 |
 
 当前适配桌面版 DSH `0.2.1-rc.2`，通过本地目录链接安装。
 

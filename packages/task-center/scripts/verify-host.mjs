@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
+import { installSessionServices } from "./host-session-services.mjs";
 
 // Use the actual host's services, rather than a second plugin-local runtime.
 const modules = process.env.DSH_HOST_MODULES;
@@ -64,6 +65,7 @@ try {
   await ctx
     .plugin((await load("dsh-agent-loop")).default, { agents: [], maxParallelToolCalls: 1 })
     .await();
+  const workspace = await installSessionServices(ctx, load, root);
   const pluginFork = ctx.plugin(plugin);
   await pluginFork.await();
   const a = await ctx.agents.create({
@@ -114,18 +116,14 @@ try {
   assert.equal(moved.target_session_id, "compat-A");
   const activity = (sessionId) =>
     ctx.waterfall("workspace/session-activity", { sessionId }, () => Promise.resolve([]));
-  assert(
-    (await activity("compat-A")).some(
-      (entry) => entry.kind === "schedule" && entry.items.some((item) => item.id === task.id),
-    ),
-  );
+  assert(!(await activity("compat-A")).some((entry) => entry.kind === "schedule"));
   assert(!(await activity("compat-B")).some((entry) => entry.kind === "schedule"));
   await ctx.parallel("workspace/session-stop", { sessionId: "compat-A" });
   const archived = (await invoke(b.agent, "task_center_list")).find(
     (entry) => entry.id === task.id,
   );
-  assert.equal(archived.enabled, false);
-  assert.equal(archived.revision, moved.revision + 1);
+  assert.equal(archived.enabled, true);
+  assert.equal(archived.revision, moved.revision);
   assert(!(await activity("compat-A")).some((entry) => entry.kind === "schedule"));
   const resumed = await invoke(a.agent, "task_center_update", {
     id: task.id,
@@ -202,13 +200,113 @@ try {
       "Completed one-shot is not armed",
     );
     console.log(
-      "DSH host integration: 8 tools, skills, transfer, no-cwd session, quit activity, archive stop, timer and durable inbox passed.",
+      "DSH host integration: tools, skills, transfer, archive preserves tasks, timer and durable inbox passed.",
     );
   } finally {
     a.agent.cancel({ kind: "user" });
     release();
   }
   await a.agent.whenIdle();
+
+  // Both plugins share the real Cordis event routing seam; no external network is used.
+  const { Bridge } = await import("../../feishu/dist/bridge.js");
+  const { Store: FeishuStore } = await import("../../feishu/dist/store.js");
+  const feishu = new Bridge(new FeishuStore(path.join(root, "feishu-test")), {
+    get: (id) => ctx.agents.get(id),
+    flush: (agent) => ctx.sessions.flush(agent.session),
+    deliver() {},
+    warn() {},
+  });
+  const bot = feishu.configure({
+    label: "test",
+    appIdRef: "TEST_ID",
+    appSecretRef: "TEST_SECRET",
+    openId: "ou_test",
+  });
+  feishu.subscribe(bot.id, "compat-A", bot.revision);
+  ctx.on("cosine/feishu-bindings", async ({ sessionId }) => feishu.bindings(sessionId));
+  ctx.on("cosine/feishu-handoff", async ({ bindings, targetSessionId }) =>
+    feishu.handoff(bindings, targetSessionId),
+  );
+  ctx.on("workspace/session-stop", ({ sessionId }) => feishu.stopSession(String(sessionId)));
+  const waitHistory = async (taskId) => {
+    const deadline = Date.now() + 7000;
+    while (Date.now() < deadline) {
+      const history = await invoke(b.agent, "task_center_history", { id: taskId });
+      if (history.length) return history;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    assert.fail(
+      `Task was not delivered: ${JSON.stringify(await invoke(b.agent, "task_center_list"))}`,
+    );
+  };
+  try {
+    await workspace.attachSession(a.agent.session.id);
+    const replacement = await invoke(a.agent, "task_center_create", {
+      title: "archive replacement",
+      prompt: "isolated archive task",
+      cwd: root,
+      rule: { kind: "once", at: new Date(Date.now() + 350).toISOString() },
+    });
+    await ctx.workspaceRegistry.archiveSession(a.agent.id);
+    const [receipt] = await waitHistory(replacement.id);
+    assert.notEqual(receipt.target_session_id, "compat-A");
+    assert.equal(receipt.replacement_reason, "archived");
+    assert(ctx.workspaceRegistry.archivedSessionIds.includes(a.agent.id));
+    assert(
+      workspace.sessionIds.includes(receipt.target_session_id),
+      "new Session belongs to Workspace",
+    );
+    assert.equal(feishu.channel(bot.id).session_id, receipt.target_session_id);
+    assert.equal(
+      (await ctx.sessionQuery.readSession(a.agent.id)).session.id,
+      a.agent.id,
+      "archived history is readable without unarchiving",
+    );
+    const cold = await ctx.agents.create({
+      sessionId: "cold-target",
+      meta: { cwd: root },
+      options: { provider: "test", model: "test" },
+    });
+    const coldId = cold.agent.id;
+    const coldTask = await invoke(b.agent, "task_center_create", {
+      title: "cold",
+      prompt: "isolated cold task",
+      target_session_id: coldId,
+      cwd: root,
+      rule: { kind: "once", at: new Date(Date.now() + 350).toISOString() },
+    });
+    await ctx.sessions.flush(cold.agent.session);
+    await cold.dispose();
+    assert.equal(ctx.agents.get(coldId), undefined);
+    assert.equal((await waitHistory(coldTask.id))[0].target_session_id, coldId);
+    const fresh = await invoke(b.agent, "task_center_create", {
+      title: "new",
+      prompt: "isolated new task",
+      target_mode: "new",
+      cwd: root,
+      rule: { kind: "once", at: new Date(Date.now() + 200).toISOString() },
+    });
+    const [created] = await waitHistory(fresh.id);
+    assert(workspace.sessionIds.includes(created.target_session_id));
+    assert.equal(
+      (await invoke(b.agent, "task_center_list")).find((t) => t.id === fresh.id).target_mode,
+      "new",
+    );
+    const missing = await invoke(b.agent, "task_center_create", {
+      title: "missing",
+      prompt: "isolated missing task",
+      target_session_id: "deleted-target",
+      cwd: root,
+      rule: { kind: "once", at: new Date(Date.now() + 200).toISOString() },
+    });
+    assert.equal((await waitHistory(missing.id))[0].replacement_reason, "missing");
+    console.log(
+      "DSH host Session Controller: cold resume, archive replacement, missing replacement, new Session, workspace membership and Feishu handoff passed.",
+    );
+  } finally {
+    await feishu.close();
+  }
   await pluginFork.dispose();
   assert.equal(fs.existsSync(path.join(root, "storages/cosine-task-center/owner.lock")), false);
   const tools = a.agent.ctx.tools.schemas(a.agent);

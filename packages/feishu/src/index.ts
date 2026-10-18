@@ -24,12 +24,27 @@ import { safeError } from "./types.js";
 
 declare module "@deepseek-ai/dsh-llm" {
   interface MessageSourceMap {
-    "cosine-feishu": { kind: "cosine-feishu" };
+    "cosine-feishu": { kind: "cosine-feishu"; eventId?: string };
   }
 }
 declare module "@deepseek-ai/dsh-workspace/types" {
   interface SessionActivityKindMap {
     schedule: true;
+  }
+}
+declare module "@deepseek-ai/cordis" {
+  interface Events {
+    "cosine/feishu-bindings"(
+      request: { sessionId: string },
+      next: () => Promise<{ channel_id: string; session_id: string; revision: number }[]>,
+    ): Promise<{ channel_id: string; session_id: string; revision: number }[]>;
+    "cosine/feishu-handoff"(
+      request: {
+        bindings: { channel_id: string; session_id: string; revision: number }[];
+        targetSessionId: string;
+      },
+      next: () => Promise<{ channel_id: string; session_id: string; revision: number }[]>,
+    ): Promise<{ channel_id: string; session_id: string; revision: number }[]>;
   }
 }
 export const name = "cosine-feishu";
@@ -53,16 +68,27 @@ type Definition = [
 ];
 
 export function apply(ctx: Context) {
+  let archived = (_id: string) => false;
+  ctx.inject(["workspaceRegistry"], (workspaceCtx) => {
+    archived = (id) =>
+      workspaceCtx.workspaceRegistry.archivedSessionIds.some((s) => String(s) === id);
+  });
   let bridge: Bridge<Agent>;
   try {
     bridge = new Bridge(new Store(join(resolveDshHome(), "storages", name)), {
-      get: (id) => ctx.agents.roots().find((a) => String(a.session.id ?? a.id) === id),
+      get: (id) =>
+        archived(id)
+          ? undefined
+          : ctx.agents.roots().find((a) => String(a.session.id ?? a.id) === id),
       flush: (agent) => ctx.sessions.flush(agent.session),
       detached: (operation) => ctx.agents.withoutInitiator(operation),
       warn: (message) => ctx.logger.warn(message),
-      deliver: (agent, message) =>
+      deliver: (agent, message, event) =>
         agent.followup(
-          createUserMessage({ content: [{ type: "text", text: message }], source: { kind: name } }),
+          createUserMessage({
+            content: [{ type: "text", text: message }],
+            source: { kind: name, eventId: event.id },
+          }),
         ),
     });
   } catch {
@@ -218,7 +244,7 @@ export function apply(ctx: Context) {
     ],
     [
       "feishu_send_text",
-      "以机器人身份发送文字，只允许当前订阅 Session。request_id 可复用查询发送结果；uncertain 不自动重发。",
+      "以机器人身份发送 Markdown 富文本，支持列表、链接、代码块等，长消息自动拆分。只允许当前订阅 Session；uncertain 不自动重发。",
       {
         channel_id: channel,
         text: string("消息内容", true),
@@ -394,18 +420,25 @@ export function apply(ctx: Context) {
       }),
       ctx.on("agent/disposed", () => bridge.kick()),
       ctx.on("workspace/session-stop", ({ sessionId }) => bridge.stopSession(String(sessionId))),
-      ctx.on("workspace/session-activity", async ({ sessionId }, next) => {
-        const bound = bridge.store.data.channels.filter((c) => c.session_id === String(sessionId));
-        const rest = await next();
-        return bound.length
-          ? [
-              {
-                kind: "schedule" as const,
-                items: bound.map((c) => ({ id: `feishu:${c.id}`, label: `飞书：${c.label}` })),
-              },
-              ...rest,
-            ]
-          : rest;
+      ctx.on("cosine/feishu-bindings", async ({ sessionId }) => bridge.bindings(sessionId)),
+      ctx.on("cosine/feishu-handoff", async ({ bindings, targetSessionId }) =>
+        bridge.handoff(bindings, targetSessionId),
+      ),
+      ctx.on("agent/inbox/claimed", ({ agent, message, turn }) => {
+        if (message.source.kind === name && message.source.eventId)
+          bridge.processing(message.source.eventId, "running", sid(agent), turn);
+      }),
+      ctx.on("agent/inbox/discarded", ({ message }) => {
+        if (message.source.kind === name && message.source.eventId)
+          bridge.processing(message.source.eventId, "failed");
+      }),
+      ctx.on("session/event", (session, event) => {
+        if (event.type === "turn/end")
+          bridge.finishTurn(
+            String(session.id),
+            event.data.turn,
+            event.data.reason.kind === "completed",
+          );
       }),
       ctx.on("credentials/reference-updated", (ref) => {
         if (
@@ -417,6 +450,7 @@ export function apply(ctx: Context) {
     for (const agent of ctx.agents.roots()) mount(agent);
     bridge.expireCards();
     bridge.kick();
+    transport.syncProcessing();
     void transport.reconcile();
     return async () => {
       stopping = true;

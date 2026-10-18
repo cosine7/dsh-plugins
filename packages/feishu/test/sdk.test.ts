@@ -58,7 +58,7 @@ function fixture() {
           app_access_token: "fake_access",
           expire: 7200,
         }
-      : { code: 0, data: { message_id: "om_sent" } };
+      : { code: 0, data: { message_id: "om_sent", reaction_id: "reaction_test" } };
     return { data, status: 200, statusText: "OK", headers: {}, config };
   });
   lark.defaultHttpInstance.defaults.adapter =
@@ -106,6 +106,70 @@ test("real SDK text send and concurrent idempotency use one API request", async 
   );
   expect(f.requests.every((r) => r.timeout === 30000)).toBe(true);
   expect(readFileSync(f.bridge.store.file, "utf8")).not.toContain("PRIVATE_SECRET_SENTINEL");
+  const body = JSON.parse(
+    f.requests.find((r) => r.url?.includes("/im/v1/messages"))!.data as string,
+  );
+  expect(body.msg_type).toBe("post");
+  expect(JSON.parse(body.content).zh_cn.content[0][0].tag).toBe("md");
+});
+
+test("a multipart Markdown send keeps stable child IDs and does not resend uncertain prefixes", async () => {
+  const f = fixture();
+  const result = await f.transport.send(
+    f.channel.id,
+    "A",
+    "# 标题\n" + "你好🙂".repeat(2000),
+    "markdown_parts",
+  );
+  const sent = f.requests.filter((r) => r.url?.includes("/im/v1/messages"));
+  expect(sent.length).toBeGreaterThan(1);
+  expect(result.message_ids).toHaveLength(sent.length);
+  expect(new Set(sent.map((r) => JSON.parse(r.data as string).uuid)).size).toBe(sent.length);
+  for (const request of sent)
+    expect(Buffer.byteLength(request.data as string, "utf8")).toBeLessThan(30000);
+  await f.transport.send(f.channel.id, "A", "# 标题\n" + "你好🙂".repeat(2000), "markdown_parts");
+  expect(f.requests.filter((r) => r.url?.includes("/im/v1/messages"))).toHaveLength(sent.length);
+});
+
+test("reactions track the exact received message and its turn, not unrelated Session activity", async () => {
+  const f = fixture();
+  f.bridge.receiveMessage(f.channel.id, {
+    messageId: "om_user",
+    openId: "ou_owner",
+    chatId: "oc_chat",
+    chatType: "p2p",
+    senderType: "user",
+    text: "test",
+  });
+  const eventId = f.bridge.events()[0].id;
+  await vi.waitFor(() => expect(f.bridge.events()[0].processing?.emoji).toBe("OK"));
+  f.bridge.processing(eventId, "running", "A", 7);
+  await vi.waitFor(() => expect(f.bridge.events()[0].processing?.emoji).toBe("Typing"));
+  f.bridge.finishTurn("A", 6, true);
+  expect(f.bridge.events()[0].processing?.state).toBe("running");
+  f.bridge.finishTurn("A", 7, true);
+  await vi.waitFor(() => expect(f.bridge.events()[0].processing?.reaction_id).toBeUndefined());
+  expect(f.bridge.events()[0].processing?.state).toBe("completed");
+  expect(
+    f.requests.some(
+      (r) => r.url?.includes("/om_user/reactions/reaction_test") && r.method === "delete",
+    ),
+  ).toBe(true);
+});
+
+test("reaction permission failure never blocks durable inbound delivery", async () => {
+  const f = fixture();
+  f.fail();
+  f.bridge.receiveMessage(f.channel.id, {
+    messageId: "om_user",
+    openId: "ou_owner",
+    chatId: "oc_chat",
+    chatType: "p2p",
+    senderType: "user",
+    text: "test",
+  });
+  await vi.waitFor(() => expect(f.bridge.events()[0].state).toBe("delivered"));
+  expect(f.bridge.events()[0].processing?.dirty).toBe(true);
 });
 test("real SDK card send, callback acknowledgement and patch payload remove buttons", async () => {
   const f = fixture();

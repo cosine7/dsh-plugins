@@ -24,6 +24,10 @@ export class Store {
       this.data = data;
       for (const event of this.data.events) {
         if (event.state === "dispatching") event.state = "uncertain";
+        if (event.processing?.state === "running") {
+          event.processing.state = "interrupted";
+          event.processing.dirty = true;
+        }
       }
       for (const outbound of this.data.outbound) {
         if (outbound.state === "sending") outbound.state = "uncertain";
@@ -123,6 +127,11 @@ function validData(value: unknown): value is StoreData {
         typeof c.enabled === "boolean" &&
         Number.isInteger(c.revision) &&
         c.revision > 0 &&
+        (c.archived_subscription === undefined ||
+          (record(c.archived_subscription) &&
+            typeof c.archived_subscription.session_id === "string" &&
+            Number.isInteger(c.archived_subscription.revision) &&
+            c.archived_subscription.revision > 0)) &&
         (c.chat_id === undefined || typeof c.chat_id === "string") &&
         (c.session_id === undefined || typeof c.session_id === "string"),
     ) &&
@@ -140,6 +149,18 @@ function validData(value: unknown): value is StoreData {
         typeof e.chat_id === "string" &&
         typeof e.text === "string" &&
         Number.isFinite(e.received_at) &&
+        (e.processing === undefined ||
+          (record(e.processing) &&
+            ["received", "running", "completed", "failed", "interrupted"].includes(
+              e.processing.state,
+            ) &&
+            typeof e.processing.dirty === "boolean" &&
+            (e.processing.reaction_id === undefined ||
+              typeof e.processing.reaction_id === "string") &&
+            (e.processing.emoji === undefined || typeof e.processing.emoji === "string") &&
+            (e.processing.turn === undefined || Number.isInteger(e.processing.turn)) &&
+            (e.processing.session_id === undefined ||
+              typeof e.processing.session_id === "string"))) &&
         ["pending", "unassigned", "dispatching", "delivered", "uncertain", "expired"].includes(
           e.state,
         ),
@@ -175,6 +196,8 @@ function validData(value: unknown): value is StoreData {
         typeof o.origin_session_id === "string" &&
         Number.isFinite(o.created_at) &&
         typeof o.content === "string" &&
+        (o.message_ids === undefined ||
+          (Array.isArray(o.message_ids) && o.message_ids.every((id) => typeof id === "string"))) &&
         ["sending", "sent", "uncertain"].includes(o.state),
     ) &&
     seen.every((k) => typeof k === "string")

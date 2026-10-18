@@ -8,6 +8,7 @@ export interface Channel {
   revision: number;
   session_id?: string;
   chat_id?: string;
+  archived_subscription?: { session_id: string; revision: number };
 }
 
 export type EventState =
@@ -33,6 +34,14 @@ export interface InboundEvent {
   action_id?: string;
   target_session_id?: string;
   delivered_at?: number;
+  processing?: {
+    state: "received" | "running" | "completed" | "failed" | "interrupted";
+    turn?: number;
+    session_id?: string;
+    reaction_id?: string;
+    emoji?: string;
+    dirty: boolean;
+  };
 }
 
 export interface Choice {
@@ -65,6 +74,7 @@ export interface Outbound {
   created_at: number;
   state: "sending" | "sent" | "uncertain";
   message_id?: string;
+  message_ids?: string[];
 }
 
 export interface StoreData {
@@ -83,7 +93,7 @@ export interface MaintenanceAgent {
 export interface Host<A extends MaintenanceAgent> {
   get(id: string): A | undefined;
   flush(agent: A): Promise<boolean>;
-  deliver(agent: A, text: string): unknown;
+  deliver(agent: A, text: string, event: InboundEvent): unknown;
   warn(message: string): void;
   detached?(operation: () => void): void;
 }

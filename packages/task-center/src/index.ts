@@ -20,6 +20,8 @@ import type {
   StringValueSchemaSpec,
 } from "@deepseek-ai/dsh-tools";
 import { errorMessage } from "./types.js";
+import { isAbsolute } from "node:path";
+import { sessionRouting } from "./routing.js";
 
 declare module "@deepseek-ai/dsh-llm" {
   interface MessageSourceMap {
@@ -40,7 +42,15 @@ declare module "@deepseek-ai/dsh-workspace/types" {
   }
 }
 export const name = "cosine-task-center";
-export const inject = ["agents", "sessions", "tools", "sessionPersistence"];
+export const inject = [
+  "agents",
+  "sessions",
+  "tools",
+  "sessionPersistence",
+  "sessionController",
+  "sessionQuery",
+  "workspaceRegistry",
+];
 const string = (description: string): StringValueSchemaSpec => ({ type: "string", description });
 const required = (description: string): ParameterPropertySpec => ({
   ...string(description),
@@ -86,10 +96,12 @@ const ruleSchema: ParameterPropertySpec = {
 };
 
 export function apply(ctx: Context) {
+  const routing = sessionRouting(ctx);
   let center: TaskCenter<Agent>;
   try {
     const store = new Store(join(resolveDshHome(), "storages", "cosine-task-center"));
     center = new TaskCenter(store, {
+      ...routing,
       get: (id) => ctx.agents.roots().find((a) => String(a.session.id ?? a.id) === id),
       flush: (agent) => ctx.sessions.flush(agent.session),
       detached: (fn) => ctx.agents.withoutInitiator(fn),
@@ -123,27 +135,71 @@ export function apply(ctx: Context) {
     ],
     [
       "task_center_sessions",
-      "列出可选择的活动根会话及当前会话 ID；不恢复未加载的历史会话。",
+      "只读列出已加载及历史会话，并标记归档状态；不会唤醒会话。",
       {},
-      (_args, agent) => ({
+      async (_args, agent) => ({
         current_session_id: sessionId(agent),
-        sessions: ctx.agents.roots().map((a) => ({
-          session_id: sessionId(a),
-          status: a.status,
-          ...(a.session.header.cwd === undefined ? {} : { cwd: a.session.header.cwd }),
+        sessions: (await ctx.sessionQuery.listSessions()).map((r) => ({
+          session_id: String(r.header.id),
+          loaded: !!ctx.agents.get(r.header.id),
+          archived: routing.archived(String(r.header.id)),
+          ...(r.header.cwd === undefined ? {} : { cwd: r.header.cwd }),
         })),
       }),
     ],
     [
       "task_center_create",
-      "创建全局定时任务，仅投递给一个执行会话；默认当前会话。先确定时区与窗口，并向用户展示工具返回的规则和触发时间。",
+      "创建全局定时任务：指定会话（默认当前）或每次触发创建新会话。归档/删除指定会话不会取消任务。保存工作目录与完整 prompt；关联的飞书订阅随目标转交。",
       {
         title: required("任务名称"),
         prompt: required("到期交给模型的完整指令"),
         rule: ruleSchema,
-        target_session_id: string("省略为当前会话，其他目标须来自 sessions 工具。"),
+        target_mode: {
+          type: "string",
+          enum: ["session", "new"],
+          description: "session 复用指定会话；new 每次触发新建，默认 session。",
+        },
+        target_session_id: string("session 模式目标 ID，省略为当前会话。"),
+        cwd: string("绝对工作目录，默认目标/当前会话的目录；新会话仅设置 cwd 和普通任务消息。"),
+        feishu_channel_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "关联并随执行目标转交的飞书通道；省略继承源会话当前订阅，空数组不关联。只能选择源会话拥有的通道。",
+        },
       },
-      (args, agent) => center.create(args, sessionId(agent)),
+      async (args, agent) => {
+        if (args.target_session_id !== undefined && typeof args.target_session_id !== "string")
+          throw new Error("target_session_id 无效。");
+        const source =
+          args.target_mode === "new"
+            ? sessionId(agent)
+            : ((args.target_session_id as string | undefined) ?? sessionId(agent));
+        const info = await routing.describe(source);
+        const cwd = args.cwd ?? info.cwd ?? agent.session.header.cwd ?? process.cwd();
+        if (typeof cwd !== "string" || !isAbsolute(cwd)) throw new Error("cwd 必须是绝对路径。");
+        const available = await routing.bindings(source);
+        const selected = args.feishu_channel_ids;
+        if (
+          selected !== undefined &&
+          (!Array.isArray(selected) ||
+            selected.some(
+              (id) => typeof id !== "string" || !available.some((b) => b.channel_id === id),
+            ))
+        )
+          throw new Error("只能关联源会话当前拥有的飞书通道。");
+        return center.create(
+          {
+            ...args,
+            cwd,
+            feishu_bindings:
+              selected === undefined
+                ? available
+                : available.filter((b) => (selected as string[]).includes(b.channel_id)),
+          },
+          sessionId(agent),
+        );
+      },
     ],
     [
       "task_center_update",
@@ -159,6 +215,12 @@ export function apply(ctx: Context) {
             title: string("新名称"),
             prompt: string("新指令"),
             enabled: { type: "boolean" },
+            cwd: string("新建或替代会话的绝对工作目录。"),
+            target_mode: {
+              type: "string",
+              enum: ["session", "new"],
+              description: "切换为每次新建；指定复用目标请用 transfer。",
+            },
             rule: Object.fromEntries(
               Object.entries(ruleSchema).filter(([key]) => key !== "required"),
             ) as ParameterPropertySpec,
@@ -169,17 +231,27 @@ export function apply(ctx: Context) {
     ],
     [
       "task_center_transfer",
-      "把任务唯一执行目标转交给另一个活动会话。省略 target_session_id 表示转到当前会话。已经投递的消息不撤回。",
+      "把任务改为投递到指定的未归档会话，并转交关联的飞书订阅。省略目标表示当前会话；已投递消息不撤回。",
       {
         id: required("任务 ID"),
         revision,
         target_session_id: string("目标会话 ID，省略使用当前会话。"),
+        rebind_feishu: {
+          type: "boolean",
+          description:
+            "显式重新关联目标会话当前订阅的飞书通道，用于用户主动调整订阅后的重新关联；默认保留任务原关联。",
+        },
       },
-      (args, agent) =>
+      async (args, agent) =>
         center.transfer(
           args.id as string,
           args.revision as number,
           (args.target_session_id as string | undefined) ?? sessionId(agent),
+          args.rebind_feishu === true
+            ? await routing.bindings(
+                (args.target_session_id as string | undefined) ?? sessionId(agent),
+              )
+            : undefined,
         ),
     ],
     [
@@ -197,6 +269,7 @@ export function apply(ctx: Context) {
     ],
   ];
   const mounted = new Map<Agent, () => unknown>();
+  const running = new Set<Promise<unknown>>();
   let stopping = false;
   const mount = (agent: Agent) => {
     if (stopping || mounted.has(agent) || !ctx.agents.roots().includes(agent)) return;
@@ -218,7 +291,13 @@ export function apply(ctx: Context) {
                   if (stopping || exec.signal.aborted || exec.agent !== agent)
                     return { error: "任务中心不可用或调用已取消。" };
                   try {
-                    return execute(args, agent) as JsonValue;
+                    const operation = Promise.resolve().then(() => execute(args, agent));
+                    running.add(operation);
+                    try {
+                      return (await operation) as JsonValue;
+                    } finally {
+                      running.delete(operation);
+                    }
                   } catch (error) {
                     return { error: errorMessage(error) };
                   }
@@ -261,30 +340,18 @@ export function apply(ctx: Context) {
       mount(agent);
       return undefined;
     });
-    // Desktop quit inspection and Workspace archive admission use the schedule family.
-    const stopActivity = ctx.on("workspace/session-activity", async ({ sessionId }, next) => {
-      const active = center.sessionActivity(String(sessionId));
-      const rest = await next();
-      return active.length
-        ? [
-            { kind: "schedule", items: active.map((task) => ({ id: task.id, label: task.title })) },
-            ...rest,
-          ]
-        : rest;
-    });
-    const stopSession = ctx.on("workspace/session-stop", ({ sessionId }) =>
-      center.stopSession(String(sessionId)),
-    );
+    // Schedules belong to the task, not the Session's archive lifecycle.
+    const stopSession = ctx.on("workspace/session-stop", () => center.kick());
     ctx.on("agent/disposed", () => center.kick());
     for (const agent of ctx.agents.roots()) mount(agent);
     center.kick();
     return async () => {
       stopping = true;
       stopCreated();
-      stopActivity();
       stopSession();
       await Promise.allSettled([...mounted.values()].map((dispose) => dispose()));
       mounted.clear();
+      await Promise.allSettled(running);
       await center.close();
     };
   }, "task-center.lifecycle");

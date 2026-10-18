@@ -254,6 +254,41 @@ test("cold sessions do not automatically load; archive removes subscription", as
   expect(f.bridge.channel(f.channel.id).session_id).toBeUndefined();
   expect(f.bridge.events()[0]?.state).toBe("unassigned");
 });
+
+test("scheduled handoff recovers archived ownership and never steals a changed subscription", () => {
+  const f = fixture();
+  f.subscribe();
+  const bindings = f.bridge.bindings("A");
+  f.bridge.stopSession("A");
+  const moved = f.bridge.handoff(bindings, "B");
+  expect(f.bridge.channel(f.channel.id).session_id).toBe("B");
+  expect(f.bridge.channel(f.channel.id).archived_subscription).toBeUndefined();
+  expect(f.bridge.handoff(bindings, "B")).toEqual(moved);
+  f.bridge.unsubscribe(f.channel.id, f.bridge.channel(f.channel.id).revision);
+  expect(() => f.bridge.handoff(moved, "A")).toThrow("主动修改");
+});
+
+test("restart marks an unfinished processing reaction interrupted and retains its deletion handle", async () => {
+  const f = fixture();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  const id = f.bridge.events()[0].id;
+  f.bridge.processing(id, "running", "A", 2);
+  f.store.transaction((data) => {
+    data.events[0].processing!.reaction_id = "prior";
+    data.events[0].processing!.emoji = "Typing";
+  });
+  await f.bridge.close();
+  const reopened = new Store(f.directory);
+  try {
+    expect(reopened.data.events[0].processing).toMatchObject({
+      state: "interrupted",
+      dirty: true,
+      reaction_id: "prior",
+    });
+  } finally {
+    reopened.close();
+  }
+});
 test("card state updates use revision and do not claim click executed anything", () => {
   const f = fixture();
   f.subscribe();

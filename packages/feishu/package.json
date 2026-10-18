@@ -1,6 +1,6 @@
 {
   "name": "@cosine/dsh-feishu",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "为 DeepSeek Harness 桌面版提供飞书双向消息、交互卡片与会话订阅",
   "license": "MIT",
@@ -29,7 +29,7 @@
     "test:host": "node scripts/verify-host.mjs"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.74.0",
+    "@larksuiteoapi/node-sdk": "^1.76.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

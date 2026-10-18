@@ -18,10 +18,10 @@ export class Store {
     try {
       const data: unknown = fs.existsSync(this.file)
         ? JSON.parse(fs.readFileSync(this.file, "utf8"))
-        : { version: 1, tasks: [], history: [] };
+        : { version: 2, tasks: [], history: [] };
       if (
         !isRecord(data) ||
-        data.version !== 1 ||
+        data.version !== 2 ||
         !Array.isArray(data.tasks) ||
         !Array.isArray(data.history)
       )
@@ -30,7 +30,23 @@ export class Store {
         if (
           !isRecord(task) ||
           typeof task.id !== "string" ||
-          typeof task.target_session_id !== "string" ||
+          !["session", "new"].includes(String(task.target_mode)) ||
+          (task.target_mode === "session" && typeof task.target_session_id !== "string") ||
+          typeof task.cwd !== "string" ||
+          !task.cwd.trim() ||
+          !Array.isArray(task.feishu_bindings) ||
+          task.feishu_bindings.some(
+            (binding: unknown) =>
+              !isRecord(binding) ||
+              typeof binding.channel_id !== "string" ||
+              typeof binding.session_id !== "string" ||
+              !Number.isInteger(binding.revision) ||
+              Number(binding.revision) <= 0,
+          ) ||
+          (task.preparing !== undefined &&
+            (!isRecord(task.preparing) ||
+              typeof task.preparing.session_id !== "string" ||
+              !Number.isSafeInteger(task.preparing.occurrence_at))) ||
           !Number.isInteger(task.revision) ||
           typeof task.enabled !== "boolean" ||
           typeof task.title !== "string" ||

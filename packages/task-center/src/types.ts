@@ -1,4 +1,15 @@
-/** 持久化结构沿用任务中心 v1 格式，迁移工程目录不迁移用户数据。 */
+export interface FeishuBinding {
+  channel_id: string;
+  session_id: string;
+  revision: number;
+}
+
+export interface Preparation {
+  session_id: string;
+  occurrence_at: number;
+  original_session_id?: string;
+  reason?: "archived" | "missing";
+}
 export interface WindowRule {
   start: string;
   end: string;
@@ -24,6 +35,8 @@ export interface Delivery {
   occurrence_at: number;
   target_session_id: string;
   accepted_at: number;
+  original_session_id?: string;
+  replacement_reason?: "archived" | "missing";
 }
 
 export interface Task {
@@ -31,7 +44,11 @@ export interface Task {
   title: string;
   prompt: string;
   rule: Rule;
-  target_session_id: string;
+  target_mode: "session" | "new";
+  target_session_id?: string;
+  cwd: string;
+  feishu_bindings: FeishuBinding[];
+  preparing?: Preparation;
   revision: number;
   enabled: boolean;
   next_at: number | null;
@@ -47,7 +64,7 @@ export interface HistoryEntry extends Delivery {
 }
 
 export interface StoreData {
-  version: 1;
+  version: 2;
   tasks: Task[];
   history: HistoryEntry[];
 }
@@ -59,6 +76,11 @@ export interface MaintenanceAgent {
 
 export interface TaskCenterHost<A extends MaintenanceAgent> {
   get(id: string): A | undefined;
+  describe(id: string): Promise<{ state: "available" | "archived" | "missing"; cwd?: string }>;
+  resolve(id: string): Promise<A>;
+  create(cwd: string, id: string): Promise<{ id: string; agent: A }>;
+  handoff(bindings: FeishuBinding[], target: string): Promise<FeishuBinding[]>;
+  archived(id: string): boolean;
   flush(agent: A): Promise<boolean>;
   deliver(agent: A, text: string): unknown;
   detached?(operation: () => void): void;
@@ -70,6 +92,9 @@ export interface CreateTaskInput {
   prompt?: unknown;
   rule?: unknown;
   target_session_id?: unknown;
+  target_mode?: unknown;
+  cwd?: unknown;
+  feishu_bindings?: FeishuBinding[];
 }
 
 export interface TaskChanges {
@@ -77,6 +102,8 @@ export interface TaskChanges {
   prompt?: string;
   rule?: Rule;
   enabled?: boolean;
+  cwd?: string;
+  target_mode?: "session" | "new";
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

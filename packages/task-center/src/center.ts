@@ -7,8 +7,10 @@ import {
   type TaskChanges,
   type TaskCenterHost,
   type MaintenanceAgent,
+  type FeishuBinding,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { normalizeRule, nextOccurrence, latestOccurrence, preview } from "./rules.js";
 
 export class TaskCenter<A extends MaintenanceAgent> {
@@ -17,6 +19,7 @@ export class TaskCenter<A extends MaintenanceAgent> {
   readonly now: () => number;
   stopped: boolean;
   pending: Map<string, Promise<void>>;
+  readonly mutating = new Set<string>();
   waiters: Set<A>;
   retryAt: Map<string, number>;
   stopSignal: Promise<void>;
@@ -42,7 +45,7 @@ export class TaskCenter<A extends MaintenanceAgent> {
   view(task: Task) {
     return {
       ...structuredClone(task),
-      target_live: !!this.host.get(task.target_session_id),
+      target_live: !!task.target_session_id && !!this.host.get(task.target_session_id),
       state: !task.enabled
         ? "paused"
         : task.next_at === null
@@ -62,16 +65,6 @@ export class TaskCenter<A extends MaintenanceAgent> {
       (task) => task.target_session_id === sessionId && task.enabled && task.next_at !== null,
     );
   }
-  stopSession(sessionId: string) {
-    if (!this.sessionActivity(sessionId).length) return;
-    this.store.transaction(() => {
-      for (const task of this.sessionActivity(sessionId)) {
-        task.enabled = false;
-        task.revision++;
-      }
-    });
-    this.kick();
-  }
   check(task: Task, revision: number) {
     if (!Number.isInteger(revision) || task.revision !== revision)
       throw new Error("任务已修改或缺少 revision，请先重新列出任务，再使用最新 revision。");
@@ -86,10 +79,15 @@ export class TaskCenter<A extends MaintenanceAgent> {
       args.prompt.length > 32000
     )
       throw new Error("需要 title（1–200 字符）和 prompt（1–32000 字符）。");
+    const mode = args.target_mode ?? "session";
+    if (mode !== "session" && mode !== "new")
+      throw new Error("target_mode 必须为 session 或 new。");
+    if (mode === "new" && args.target_session_id !== undefined)
+      throw new Error("新建模式不能同时指定 target_session_id。");
+    if (typeof args.cwd !== "string" || !isAbsolute(args.cwd))
+      throw new Error("需要绝对工作目录 cwd。");
     const target = args.target_session_id ?? currentSession;
     if (typeof target !== "string" || !target.trim()) throw new Error("需要有效目标会话。");
-    if (target !== currentSession && !this.host.get(target))
-      throw new Error("请从 task_center_sessions 返回的活动会话中选择目标，或进入目标会话后创建。");
     const rule = normalizeRule(args.rule, this.now());
     const next = nextOccurrence(rule, this.now());
     if (next === null) throw new Error("规则没有未来触发时间。");
@@ -98,7 +96,10 @@ export class TaskCenter<A extends MaintenanceAgent> {
       title: args.title.trim(),
       prompt: args.prompt.trim(),
       rule,
-      target_session_id: target,
+      target_mode: mode,
+      ...(mode === "session" ? { target_session_id: target } : {}),
+      cwd: args.cwd,
+      feishu_bindings: args.feishu_bindings ?? [],
       revision: 1,
       enabled: true,
       next_at: next,
@@ -115,13 +116,28 @@ export class TaskCenter<A extends MaintenanceAgent> {
   update(id: string, revision: number, changes: unknown) {
     const task = this.task(id);
     this.check(task, revision);
+    if (this.mutating.has(id)) throw new Error("任务正在转交，请稍后修改。");
     if (this.pending.has(id)) throw new Error("任务正在投递，请稍后重新列出并修改。");
     if (
       !isRecord(changes) ||
       !Object.keys(changes).length ||
-      Object.keys(changes).some((k) => !["title", "prompt", "rule", "enabled"].includes(k))
+      Object.keys(changes).some(
+        (k) => !["title", "prompt", "rule", "enabled", "cwd", "target_mode"].includes(k),
+      )
     )
-      throw new Error("changes 支持 title、prompt、rule、enabled；切换会话请用 transfer。");
+      throw new Error(
+        "changes 支持 title、prompt、rule、enabled、cwd、target_mode；指定会话请用 transfer。",
+      );
+    if (changes.cwd !== undefined && (typeof changes.cwd !== "string" || !isAbsolute(changes.cwd)))
+      throw new Error("cwd 必须是绝对路径。");
+    if (
+      changes.target_mode !== undefined &&
+      changes.target_mode !== "session" &&
+      changes.target_mode !== "new"
+    )
+      throw new Error("target_mode 无效。");
+    if (changes.target_mode === "session" && !task.target_session_id)
+      throw new Error("请通过 transfer 指定复用目标会话。");
     if (
       changes.title !== undefined &&
       (typeof changes.title !== "string" || !changes.title.trim() || changes.title.length > 200)
@@ -141,6 +157,8 @@ export class TaskCenter<A extends MaintenanceAgent> {
     const updated = this.store.transaction(() => {
       const target = this.task(id);
       Object.assign(target, normalized);
+      if (changes.target_mode === "new") delete target.target_session_id;
+      if (changes.target_mode !== undefined || changes.cwd !== undefined) delete target.preparing;
       target.revision++;
       if (changes.rule !== undefined || changes.enabled === true) {
         target.next_at = nextOccurrence(target.rule, this.now());
@@ -153,22 +171,38 @@ export class TaskCenter<A extends MaintenanceAgent> {
     this.kick();
     return this.view(updated);
   }
-  transfer(id: string, revision: number, target: string) {
+  async transfer(id: string, revision: number, target: string, bindings?: FeishuBinding[]) {
     const task = this.task(id);
     this.check(task, revision);
-    if (!this.host.get(target))
-      throw new Error(
-        "目标必须是 task_center_sessions 中的活动会话；可在目标会话中说“转交给当前会话”。",
-      );
-    const updated = this.store.transaction(() => {
-      task.target_session_id = target;
-      task.revision++;
-      return task;
-    });
-    this.kick();
-    return this.view(updated);
+    if (this.pending.has(id) || this.mutating.has(id))
+      throw new Error("任务正在准备、投递或转交，请稍后操作。");
+    this.mutating.add(id);
+    try {
+      const info = await this.host.describe(target);
+      if (info.state !== "available") throw new Error("请选择存在且未归档的目标会话。");
+      this.check(this.task(id), revision);
+      const agent = await this.host.resolve(target);
+      if (!agent || this.host.archived(target)) throw new Error("目标会话不可用。");
+      const moved = await this.host.handoff(bindings ?? task.feishu_bindings, target);
+      const updated = this.store.transaction(() => {
+        const current = this.task(id);
+        current.target_session_id = target;
+        current.target_mode = "session";
+        current.cwd = info.cwd ?? current.cwd;
+        current.feishu_bindings = moved;
+        delete current.preparing;
+        current.revision++;
+        return current;
+      });
+      this.kick();
+      return this.view(updated);
+    } finally {
+      this.mutating.delete(id);
+      this.kick();
+    }
   }
   remove(id: string, revision: number) {
+    if (this.mutating.has(id)) throw new Error("任务正在转交，请稍后删除。");
     this.check(this.task(id), revision);
     this.store.transaction((data) => {
       data.tasks = data.tasks.filter((t) => t.id !== id);
@@ -194,11 +228,16 @@ export class TaskCenter<A extends MaintenanceAgent> {
     clearTimeout(this.timer);
     let delay = 60000;
     for (const task of this.store.data.tasks) {
-      if (!task.enabled || task.dispatching || task.next_at === null || this.pending.has(task.id))
+      if (
+        !task.enabled ||
+        task.dispatching ||
+        task.next_at === null ||
+        this.pending.has(task.id) ||
+        this.mutating.has(task.id)
+      )
         continue;
-      const agent = this.host.get(task.target_session_id);
-      if (!agent) continue;
-      if (this.waiters.has(agent)) continue;
+      const agent = task.target_session_id ? this.host.get(task.target_session_id) : undefined;
+      if (agent && this.waiters.has(agent)) continue;
       if ((this.retryAt.get(task.id) ?? 0) > this.now()) {
         delay = Math.min(delay, (this.retryAt.get(task.id) ?? 0) - this.now());
         continue;
@@ -207,11 +246,19 @@ export class TaskCenter<A extends MaintenanceAgent> {
         delay = Math.min(delay, task.next_at - this.now());
         continue;
       }
-      const operation = this.dispatch(task.id, agent);
+      const operation = this.prepareAndDispatch(task.id);
       this.pending.set(task.id, operation);
       void operation
         .catch((e) => {
           this.retryAt.set(task.id, this.now() + 60000);
+          try {
+            if (this.store.data.tasks.some((t) => t.id === task.id))
+              this.store.transaction(() => {
+                this.task(task.id).error = errorMessage(e);
+              });
+          } catch {
+            this.host.warn("任务错误状态无法持久化，请检查磁盘。");
+          }
           this.host.warn(String(e));
         })
         .finally(() => {
@@ -227,6 +274,63 @@ export class TaskCenter<A extends MaintenanceAgent> {
     );
     this.timer?.unref();
   }
+  async prepareAndDispatch(id: string): Promise<void> {
+    let task = this.task(id);
+    const revision = task.revision;
+    if (this.stopped || !task.enabled || task.next_at === null || task.next_at > this.now()) return;
+    if (!task.preparing) {
+      const original = task.target_mode === "session" ? task.target_session_id : undefined;
+      const info = original ? await this.host.describe(original) : undefined;
+      task = this.task(id);
+      if (this.stopped || !task.enabled || task.revision !== revision) return;
+      if (original && info?.state === "available") {
+        const agent = await this.host.resolve(original);
+        if (!this.host.archived(original)) await this.dispatch(id, agent);
+        return;
+      }
+      this.store.transaction(() => {
+        task.preparing = {
+          session_id: `session-${randomUUID()}`,
+          occurrence_at: task.next_at!,
+          ...(original
+            ? { original_session_id: original, reason: info!.state as "archived" | "missing" }
+            : {}),
+        };
+      });
+    }
+    const preparation = structuredClone(task.preparing!);
+    if (this.host.archived(preparation.session_id)) {
+      this.store.transaction(() => {
+        task.preparing = {
+          ...preparation,
+          session_id: `session-${randomUUID()}`,
+          original_session_id: preparation.session_id,
+          reason: "archived",
+        };
+      });
+      return this.prepareAndDispatch(id);
+    }
+    const created = await this.host.create(task.cwd, preparation.session_id);
+    task = this.task(id);
+    if (this.stopped || !task.enabled || task.revision !== revision) return;
+    // Persist the actual host identity before any subscription or message is moved.
+    if (created.id !== preparation.session_id) {
+      this.store.transaction(() => {
+        task.preparing!.session_id = created.id;
+      });
+    }
+    const moved = await this.host.handoff(task.feishu_bindings, created.id);
+    task = this.task(id);
+    if (this.stopped || !task.enabled || task.revision !== revision) return;
+    this.store.transaction(() => {
+      task.feishu_bindings = moved;
+      if (task.target_mode === "session" && task.target_session_id !== created.id) {
+        task.target_session_id = created.id;
+        task.revision++;
+      }
+    });
+    if (!this.host.archived(created.id)) await this.dispatch(id, created.agent);
+  }
   async dispatch(id: string, agent: A) {
     // 和官方 Schedule 一样，在 Agent 空闲维护边界串行接受投递。
     let maintenance;
@@ -240,7 +344,8 @@ export class TaskCenter<A extends MaintenanceAgent> {
           task.dispatching ||
           task.next_at === null ||
           task.next_at > this.now() ||
-          this.host.get(task.target_session_id) !== agent
+          this.host.get(task.preparing?.session_id ?? task.target_session_id ?? "") !== agent ||
+          this.host.archived(task.preparing?.session_id ?? task.target_session_id ?? "")
         )
           return;
         if (!(await this.host.flush(agent))) throw new Error("会话持久化未就绪，尚未投递。");
@@ -253,7 +358,8 @@ export class TaskCenter<A extends MaintenanceAgent> {
           task.dispatching ||
           task.next_at === null ||
           task.next_at > this.now() ||
-          this.host.get(task.target_session_id) !== agent
+          this.host.get(task.preparing?.session_id ?? task.target_session_id ?? "") !== agent ||
+          this.host.archived(task.preparing?.session_id ?? task.target_session_id ?? "")
         )
           return;
         const accepted = this.now();
@@ -264,8 +370,14 @@ export class TaskCenter<A extends MaintenanceAgent> {
         const marker = {
           id: randomUUID(),
           occurrence_at: occurrence,
-          target_session_id: task.target_session_id,
+          target_session_id: task.preparing?.session_id ?? task.target_session_id!,
           accepted_at: accepted,
+          ...(task.preparing?.original_session_id
+            ? {
+                original_session_id: task.preparing.original_session_id,
+                replacement_reason: task.preparing.reason,
+              }
+            : {}),
         };
         const next = nextOccurrence(task.rule, accepted);
         // Persist an intent before followup. A crash in this gap pauses, never blindly re-delivers.
@@ -276,7 +388,7 @@ export class TaskCenter<A extends MaintenanceAgent> {
         try {
           this.host.deliver(
             agent,
-            `[Task Center: ${task.title}]\nTask ID: ${id}\nOccurrence: ${new Date(occurrence).toISOString()}\nDelivery ID: ${marker.id}\n\n${task.prompt}`,
+            `[Task Center: ${task.title}]\nTask ID: ${id}\nOccurrence: ${new Date(occurrence).toISOString()}\nDelivery ID: ${marker.id}\n\n${task.preparing?.original_session_id ? `本任务原计划投递到 ${task.preparing.original_session_id}，但该会话${task.preparing.reason === "archived" ? "已归档。原会话历史仍保留，如有可用的会话搜索或读取工具，可以按上述 Session ID 查阅；不要解除归档或恢复运行原会话。" : "已不存在，无法依赖原会话历史。"}\n因此改由当前新会话执行，未继承原会话上下文。\n\n原任务指令：\n` : ""}${task.prompt}`,
           );
           if (!(await this.host.flush(agent))) throw new Error("投递后的持久化未确认。");
           this.store.transaction((data) => {
@@ -286,6 +398,8 @@ export class TaskCenter<A extends MaintenanceAgent> {
               if (current.next_at === task.next_at) current.next_at = next;
               current.last_delivery = marker;
               delete current.dispatching;
+              delete current.preparing;
+              delete current.error;
             }
             data.history.push({ task_id: id, ...marker, state: "delivered" });
             data.history = data.history.slice(-500);

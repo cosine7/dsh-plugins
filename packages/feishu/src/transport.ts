@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { credentialRef, type CredentialProvider } from "@deepseek-ai/dsh-credentials";
 import type { Bridge } from "./bridge.js";
 import { renderCard } from "./cards.js";
+import { markdownPost, splitMarkdown } from "./messages.js";
 import {
   record,
   text,
@@ -13,7 +14,11 @@ import {
   type MaintenanceAgent,
 } from "./types.js";
 
-export const requiredScopes = ["im:message:send_as_bot", "im:message.p2p_msg:readonly"];
+export const requiredScopes = [
+  "im:message:send_as_bot",
+  "im:message.p2p_msg:readonly",
+  "im:message.reactions:write_only",
+];
 export const requiredEvents = ["im.message.receive_v1"];
 export const requiredCallbacks = ["card.action.trigger"];
 
@@ -112,12 +117,16 @@ export class Transport<A extends MaintenanceAgent> {
   private reconnectTimer?: NodeJS.Timeout;
   private cardRetry?: NodeJS.Timeout;
   private readonly cardSends = new Map<string, Promise<unknown>>();
+  private processingSync?: Promise<void>;
+  private processingRetry?: NodeJS.Timeout;
+  private processingChanged = false;
 
   constructor(
     readonly bridge: Bridge<A>,
     readonly credentials: Credentials,
   ) {
     bridge.onCardsChanged = () => this.syncCards();
+    bridge.onProcessingChanged = () => this.syncProcessing();
   }
   private readonly logger: lark.Logger = {
     debug() {},
@@ -204,10 +213,12 @@ export class Transport<A extends MaintenanceAgent> {
       onReady: () => {
         delete runtime.error;
         this.syncCards();
+        this.syncProcessing();
       },
       onReconnected: () => {
         delete runtime.error;
         this.syncCards();
+        this.syncProcessing();
       },
       onError: () => {
         runtime.error = "长连接出现错误，请检查网络和飞书长连接配置。";
@@ -345,23 +356,36 @@ export class Transport<A extends MaintenanceAgent> {
       });
     });
     try {
-      const response = await runtime.client.im.message.create({
-        params: { receive_id_type: "open_id" },
-        data: {
-          receive_id: channel.authorized_open_id,
-          msg_type: cardId ? "interactive" : "text",
-          content: cardId ? content : JSON.stringify({ text: content }),
-          uuid,
-        },
-      });
-      checkResponse(response);
-      if (!response.data?.message_id) throw new Error("消息 ID 缺失。");
-      const messageId = response.data.message_id;
+      const parts = cardId ? [content] : splitMarkdown(content);
+      const messageIds: string[] = [];
+      for (const [index, part] of parts.entries()) {
+        this.bridge.requireOwner(id, sessionId);
+        if (this.stopped) throw new Error("插件已停止。");
+        const response = await runtime.client.im.message.create({
+          params: { receive_id_type: "open_id" },
+          data: {
+            receive_id: channel.authorized_open_id,
+            msg_type: cardId ? "interactive" : "post",
+            content: cardId ? part : markdownPost(part),
+            uuid:
+              index === 0
+                ? uuid
+                : createHash("sha256").update(`${uuid}:${index}`).digest("hex").slice(0, 48),
+          },
+        });
+        checkResponse(response);
+        if (!response.data?.message_id) throw new Error("消息 ID 缺失。");
+        const messageId = response.data.message_id;
+        messageIds.push(messageId);
+        this.bridge.store.transaction((data) => {
+          const item = data.outbound.find((o) => o.id === uuid)!;
+          item.message_id = messageIds[0];
+          item.message_ids = [...messageIds];
+          if (cardId) this.bridge.card(cardId).message_id = messageId;
+        });
+      }
       this.bridge.store.transaction((data) => {
-        const item = data.outbound.find((o) => o.id === uuid)!;
-        item.state = "sent";
-        item.message_id = messageId;
-        if (cardId) this.bridge.card(cardId).message_id = messageId;
+        data.outbound.find((o) => o.id === uuid)!.state = "sent";
       });
       return structuredClone(this.bridge.store.data.outbound.find((o) => o.id === uuid)!);
     } catch (error) {
@@ -372,6 +396,85 @@ export class Transport<A extends MaintenanceAgent> {
       throw new Error(
         `${safeError(error)} 发送结果不确定，请检查飞书记录，不要更换 request_id 重发。`,
       );
+    }
+  }
+
+  syncProcessing() {
+    if (this.stopped) return;
+    if (this.processingSync) {
+      this.processingChanged = true;
+      return;
+    }
+    this.processingChanged = false;
+    clearTimeout(this.processingRetry);
+    this.processingSync = this.updateProcessing()
+      .catch(() => {
+        this.bridge.host.warn("feishu: 表情状态更新失败，将重试；消息投递不受影响。");
+      })
+      .finally(() => {
+        this.processingSync = undefined;
+        if (this.processingChanged && !this.stopped) {
+          this.syncProcessing();
+          return;
+        }
+        if (!this.stopped && this.bridge.store.data.events.some((e) => e.processing?.dirty)) {
+          this.processingRetry = setTimeout(() => this.syncProcessing(), 30000);
+          this.processingRetry.unref();
+        }
+      });
+  }
+  private async updateProcessing() {
+    for (const item of this.bridge.store.data.events.filter(
+      (e) => e.kind === "text" && e.processing?.dirty,
+    )) {
+      if (this.stopped) return;
+      try {
+        const channel = this.bridge.channel(item.channel_id);
+        if (!channel.enabled) continue;
+        const runtime = await this.ensure(channel);
+        const current = () => this.bridge.store.data.events.find((e) => e.id === item.id)!;
+        const desired = () => {
+          const state = current().processing!.state;
+          return state === "received"
+            ? "OK"
+            : state === "running"
+              ? "Typing"
+              : state === "completed"
+                ? undefined
+                : "CrossMark";
+        };
+        let state = current().processing!;
+        if (state.reaction_id && state.emoji !== desired()) {
+          checkResponse(
+            await runtime.client.im.messageReaction.delete({
+              path: { message_id: item.message_id, reaction_id: state.reaction_id },
+            }),
+          );
+          this.bridge.store.transaction(() => {
+            delete current().processing!.reaction_id;
+            delete current().processing!.emoji;
+          });
+        }
+        const emoji = desired();
+        state = current().processing!;
+        if (emoji && !state.reaction_id) {
+          const response = await runtime.client.im.messageReaction.create({
+            path: { message_id: item.message_id },
+            data: { reaction_type: { emoji_type: emoji } },
+          });
+          checkResponse(response);
+          if (!response.data?.reaction_id) throw new Error("表情回应 ID 缺失。");
+          this.bridge.store.transaction(() => {
+            current().processing!.reaction_id = response.data!.reaction_id;
+            current().processing!.emoji = emoji;
+          });
+        }
+        this.bridge.store.transaction(() => {
+          current().processing!.dirty = current().processing!.emoji !== desired();
+        });
+      } catch {
+        this.bridge.host.warn("feishu: 表情回应不可用，请检查应用表情回应权限或消息是否已撤回。");
+      }
     }
   }
 
@@ -480,9 +583,11 @@ export class Transport<A extends MaintenanceAgent> {
     this.stopped = true;
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.cardRetry);
+    clearTimeout(this.processingRetry);
     for (const runtime of this.runtimes.values()) runtime.ws?.close({ force: true });
     await this.reconcileChain;
     await this.syncing;
+    await this.processingSync;
     for (const runtime of this.runtimes.values()) runtime.ws?.close({ force: true });
     this.runtimes.clear();
   }

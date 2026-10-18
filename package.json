@@ -17,14 +17,14 @@
     "check": "pnpm run typecheck && pnpm run lint && pnpm run fmt:check && pnpm run test && pnpm run build"
   },
   "devDependencies": {
-    "@types/node": "^24.19.2",
-    "oxfmt": "^0.72.0",
-    "oxlint": "^1.87.0",
+    "@types/node": "^26.6.5",
+    "oxfmt": "^0.73.0",
+    "oxlint": "^1.88.0",
     "oxlint-tsgolint": "^7.0.2004",
     "simple-git-hooks": "^2.14.0",
     "tsdown": "^0.23.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.5"
   },
   "simple-git-hooks": {
     "pre-commit": "pnpm check",
@@ -33,12 +33,12 @@
   "devEngines": {
     "runtime": {
       "name": "node",
-      "version": "^24.0.0",
+      "version": "^24.22.0",
       "onFail": "download"
     }
   },
   "engines": {
     "node": ">=24.0.0"
   },
-  "packageManager": "pnpm@12.11.2"
+  "packageManager": "pnpm@12.14.0"
 }
