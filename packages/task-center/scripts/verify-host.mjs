@@ -252,6 +252,10 @@ try {
     const [receipt] = await waitHistory(replacement.id);
     assert.notEqual(receipt.target_session_id, "compat-A");
     assert.equal(receipt.replacement_reason, "archived");
+    assert.equal(
+      ctx.sessionTitle.get(ctx.agents.get(receipt.target_session_id).session).title,
+      "archive replacement",
+    );
     assert(ctx.workspaceRegistry.archivedSessionIds.includes(a.agent.id));
     assert(
       workspace.sessionIds.includes(receipt.target_session_id),
@@ -282,12 +286,27 @@ try {
     assert.equal((await waitHistory(coldTask.id))[0].target_session_id, coldId);
     const fresh = await invoke(b.agent, "task_center_create", {
       title: "new",
+      session_title: "创建者指定的验收标题",
       prompt: "isolated new task",
       target_mode: "new",
       cwd: root,
       rule: { kind: "once", at: new Date(Date.now() + 200).toISOString() },
     });
     const [created] = await waitHistory(fresh.id);
+    assert.equal(
+      ctx.sessionTitle.get(ctx.agents.get(created.target_session_id).session).title,
+      "创建者指定的验收标题",
+    );
+    const titled = await ctx.sessionPersistence.open(created.target_session_id, "read");
+    try {
+      const persisted = await titled.read();
+      const named = persisted.events.find((e) => e.type === "session/title");
+      const taskInput = persisted.events.find((e) => e.type === "agent/inbox/spliced");
+      assert.equal(named.data.title, "创建者指定的验收标题");
+      assert(named.seq < taskInput.seq, "title must be persisted before the task message");
+    } finally {
+      await titled.close();
+    }
     assert(workspace.sessionIds.includes(created.target_session_id));
     assert.equal(
       (await invoke(b.agent, "task_center_list")).find((t) => t.id === fresh.id).target_mode,
@@ -302,7 +321,7 @@ try {
     });
     assert.equal((await waitHistory(missing.id))[0].replacement_reason, "missing");
     console.log(
-      "DSH host Session Controller: cold resume, archive replacement, missing replacement, new Session, workspace membership and Feishu handoff passed.",
+      "DSH host Session Controller: cold resume, archive replacement, missing replacement, new Session, durable creator titles, workspace membership and Feishu handoff passed.",
     );
   } finally {
     await feishu.close();

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { normalizeRule } from "./rules.js";
-import { isRecord, type StoreData } from "./types.js";
+import { isRecord, validateSessionTitle, type StoreData } from "./types.js";
 
 export class Store {
   readonly file: string;
@@ -55,6 +55,7 @@ export class Store {
         )
           throw new Error("任务存储损坏；未修改原文件。");
         normalizeRule(task.rule);
+        if (task.session_title !== undefined) validateSessionTitle(task.session_title);
         if (task.dispatching) {
           task.enabled = false;
           task.error =

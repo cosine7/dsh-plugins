@@ -18,6 +18,7 @@ function fixture(t: TestContext) {
   const archived = new Set<string>();
   const stored = new Set(["A", "B"]);
   const deliveries: { id: string; text: string }[] = [];
+  const titles = new Map<string, string>();
   for (const id of ["A", "B"])
     agents.set(id, { id, runMaintenance: (fn) => fn(), whenIdle: () => Promise.resolve() });
   const host: TaskCenterHost<TestAgent> = {
@@ -38,6 +39,9 @@ function fixture(t: TestContext) {
       if (!agents.has(id))
         agents.set(id, { id, runMaintenance: (fn) => fn(), whenIdle: async () => {} });
       return { id, agent: agents.get(id)! };
+    },
+    name: async (agent, title) => {
+      if (!titles.has(agent.id)) titles.set(agent.id, title);
     },
     handoff: async (bindings, target) =>
       bindings.map((b) => ({ ...b, session_id: target, revision: b.revision + 1 })),
@@ -64,6 +68,7 @@ function fixture(t: TestContext) {
     stored,
     agent,
     deliveries,
+    titles,
     host,
     center,
     advance: (delta: number) => (now += delta),
@@ -326,4 +331,133 @@ test("retargeting excludes concurrent mutation and dispatch until its handoff co
   release();
   await moving;
   expect(f.center.task(task.id).target_session_id).toBe("A");
+});
+
+// Failure modes: missing/invalid titles, lost persistence, renaming existing Sessions,
+// unnamed archive/deletion replacements, premature delivery and duplicate creation on retry.
+test("creator chooses and updates the persistent title for newly created Sessions", async (t) => {
+  const f = fixture(t);
+  const task = f.center.create(
+    {
+      title: "task label",
+      session_title: "创建者指定的会话",
+      prompt: "run",
+      cwd: "C:/test",
+      target_mode: "new",
+      rule: { kind: "interval", every_minutes: 20 },
+    },
+    "B",
+  );
+  expect(f.center.task(task.id).session_title).toBe("创建者指定的会话");
+  expect(JSON.parse(fs.readFileSync(f.store.file, "utf8")).tasks[0].session_title).toBe(
+    "创建者指定的会话",
+  );
+  f.advance(20 * 60000);
+  await f.center.prepareAndDispatch(task.id);
+  expect(f.titles.get(f.deliveries[0].id)).toBe("创建者指定的会话");
+  f.center.update(task.id, f.center.task(task.id).revision, { session_title: "下一次的新标题" });
+  f.advance(20 * 60000);
+  await f.center.prepareAndDispatch(task.id);
+  expect(f.titles.get(f.deliveries[1].id)).toBe("下一次的新标题");
+  expect(f.titles.get(f.deliveries[0].id)).toBe("创建者指定的会话");
+});
+
+test("an omitted Session title defaults to the task name without renaming a reused Session", async (t) => {
+  const f = fixture(t),
+    existing = create(f.center);
+  f.titles.set("B", "用户已有名称");
+  f.advance(20 * 60000);
+  await f.center.prepareAndDispatch(existing.id);
+  expect(f.titles.get("B")).toBe("用户已有名称");
+  const fresh = f.center.create(
+    {
+      title: "默认会话名称",
+      prompt: "run",
+      cwd: "C:/test",
+      target_mode: "new",
+      rule: { kind: "interval", every_minutes: 20 },
+    },
+    "B",
+  );
+  f.advance(20 * 60000);
+  await f.center.prepareAndDispatch(fresh.id);
+  expect(f.titles.get(f.deliveries.at(-1)!.id)).toBe("默认会话名称");
+});
+
+test.for(["", "   ", "a\nb", "x".repeat(201), 42, null].map((value) => ({ value })))(
+  "invalid Session title %j is rejected before writing a task",
+  ({ value }, t) => {
+    const f = fixture(t);
+    expect(() =>
+      f.center.create(
+        {
+          title: "task",
+          session_title: value,
+          prompt: "run",
+          cwd: "C:/test",
+          target_mode: "new",
+          rule: { kind: "interval", every_minutes: 20 },
+        },
+        "B",
+      ),
+    ).toThrow(/session_title/);
+    expect(f.store.data.tasks).toHaveLength(0);
+    const task = create(f.center);
+    expect(() => f.center.update(task.id, 1, { session_title: value })).toThrow(/session_title/);
+    expect(f.center.task(task.id).revision).toBe(1);
+  },
+);
+
+test.for(["archived", "missing"] as const)(
+  "%s replacement receives the creator's title",
+  async (state, t) => {
+    const f = fixture(t),
+      task = create(f.center);
+    f.center.update(task.id, 1, { session_title: "替代会话名称" });
+    if (state === "archived") f.archived.add("B");
+    else {
+      f.stored.delete("B");
+      f.agents.delete("B");
+    }
+    f.advance(20 * 60000);
+    await f.center.prepareAndDispatch(task.id);
+    expect(f.titles.get(f.deliveries[0].id)).toBe("替代会话名称");
+  },
+);
+
+test("title failure blocks handoff and delivery, and retry reuses the prepared Session", async (t) => {
+  const f = fixture(t),
+    task = create(f.center);
+  f.archived.add("B");
+  f.advance(20 * 60000);
+  const name = f.host.name.bind(f.host);
+  const handoff = f.host.handoff.bind(f.host);
+  let handoffs = 0;
+  f.host.handoff = async (...args) => {
+    handoffs++;
+    return handoff(...args);
+  };
+  f.host.name = async () => {
+    throw new Error("title failed");
+  };
+  await expect(f.center.prepareAndDispatch(task.id)).rejects.toThrow("title failed");
+  const prepared = f.center.task(task.id).preparing!.session_id;
+  expect(handoffs).toBe(0);
+  expect(f.deliveries).toHaveLength(0);
+  f.host.name = name;
+  await f.center.prepareAndDispatch(task.id);
+  expect(f.deliveries[0].id).toBe(prepared);
+  expect(f.agents.size).toBe(3);
+});
+
+test("title must be durable before handoff or task delivery", async (t) => {
+  const f = fixture(t),
+    task = create(f.center);
+  f.archived.add("B");
+  f.advance(20 * 60000);
+  f.host.flush = async () => false;
+  await expect(f.center.prepareAndDispatch(task.id)).rejects.toThrow(/标题.*持久化/);
+  expect(f.deliveries).toHaveLength(0);
+  expect(f.center.task(task.id).dispatching).toBeUndefined();
+  expect(f.center.task(task.id).target_session_id).toBe("B");
 });

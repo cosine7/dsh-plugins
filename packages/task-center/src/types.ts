@@ -42,6 +42,7 @@ export interface Delivery {
 export interface Task {
   id: string;
   title: string;
+  session_title?: string;
   prompt: string;
   rule: Rule;
   target_mode: "session" | "new";
@@ -79,6 +80,7 @@ export interface TaskCenterHost<A extends MaintenanceAgent> {
   describe(id: string): Promise<{ state: "available" | "archived" | "missing"; cwd?: string }>;
   resolve(id: string): Promise<A>;
   create(cwd: string, id: string): Promise<{ id: string; agent: A }>;
+  name(agent: A, title: string): Promise<void>;
   handoff(bindings: FeishuBinding[], target: string): Promise<FeishuBinding[]>;
   archived(id: string): boolean;
   flush(agent: A): Promise<boolean>;
@@ -89,6 +91,7 @@ export interface TaskCenterHost<A extends MaintenanceAgent> {
 
 export interface CreateTaskInput {
   title?: unknown;
+  session_title?: unknown;
   prompt?: unknown;
   rule?: unknown;
   target_session_id?: unknown;
@@ -99,6 +102,7 @@ export interface CreateTaskInput {
 
 export interface TaskChanges {
   title?: string;
+  session_title?: string;
   prompt?: string;
   rule?: Rule;
   enabled?: boolean;
@@ -112,4 +116,10 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function validateSessionTitle(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 200 || /[\r\n]/.test(value))
+    throw new Error("session_title 必须是 1–200 字符的非空单行标题。");
+  return value.trim();
 }

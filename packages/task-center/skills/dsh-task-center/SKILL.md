@@ -12,6 +12,7 @@ description: 通用全局定时任务中心：自然语言调度、cron、多个
 1. 理解任务内容与时间规则。明确时区、日期、间隔起点、结束时间和午间等排除窗口。仅在影响结果的歧义存在时追问；不要默认“工作日”包含交易日历。
 2. 将要求转为下列规则之一。复杂时间先调用 task_center_preview，检查接下来的 UTC 与本地时间是否符合用户意思。
 3. 用 task_center_create 创建；`target_mode=session`（默认）复用 target_session_id，省略 ID 为当前会话；`target_mode=new` 每次触发新建，不能同时指定 ID。`cwd` 保存新建或替代会话的绝对目录，省略从源会话获取。prompt 必须自包含。返回规则、任务 ID、目标模式和触发时间。工具报错不代表创建成功。
+   创建者通过 `session_title` 指定新会话标题（1–200 字符单行），省略使用任务名称；日期、用途等由创建者自行组织。此标题只用于新建或替代会话，不改已有目标的名称；update 可修改未来会话的 session_title。无需伪造 user 来源触发自动起名，也无需为标题调用模型。
 4. 修改、删除、转交前调用 task_center_list，使用精确 id 和最新 revision。发生 revision 冲突就重新读取，不覆盖别人刚做的修改。
 5. 用户说“转到这里/不要在 B 里跑”时，调用 task_center_transfer，省略 target_session_id 即当前会话；不是复制任务。转交其他会话需先 task_center_sessions 获取有效 ID。
 6. 可通过 update 的 target_mode=new 改为每次新建，改回指定会话使用 transfer。不要自行决定哪些日期共用会话；业务编排由调用者决定，插件只执行给定规则。

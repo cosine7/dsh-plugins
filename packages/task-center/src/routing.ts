@@ -1,8 +1,10 @@
 import type { Context } from "@deepseek-ai/cordis";
+import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { SessionId } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-api-session-controller";
 import type {} from "@deepseek-ai/dsh-session-query";
 import type {} from "@deepseek-ai/dsh-workspace";
+import type {} from "@deepseek-ai/dsh-session-title";
 import type { FeishuBinding } from "./types.js";
 import { realpath } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
@@ -48,6 +50,11 @@ export function sessionRouting(ctx: Context) {
     describe,
     resolve,
     archived,
+    async name(agent: Agent, title: string) {
+      if (archived(String(agent.session.id))) throw new Error("准备中的会话已归档，不能设置标题。");
+      // Retried preparation must never replace a name the user has already chosen.
+      if (!ctx.sessionTitle.get(agent.session)) ctx.sessionTitle.rename(agent.session, title);
+    },
     async create(cwd: string, id: string) {
       const info = await describe(id);
       if (info.state === "archived") throw new Error("准备中的会话已归档。");

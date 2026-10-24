@@ -2,6 +2,7 @@ import type { Store } from "./store.js";
 import {
   isRecord,
   errorMessage,
+  validateSessionTitle,
   type Task,
   type CreateTaskInput,
   type TaskChanges,
@@ -94,6 +95,9 @@ export class TaskCenter<A extends MaintenanceAgent> {
     const task: Task = {
       id: randomUUID(),
       title: args.title.trim(),
+      ...(args.session_title === undefined
+        ? {}
+        : { session_title: validateSessionTitle(args.session_title) }),
       prompt: args.prompt.trim(),
       rule,
       target_mode: mode,
@@ -122,11 +126,14 @@ export class TaskCenter<A extends MaintenanceAgent> {
       !isRecord(changes) ||
       !Object.keys(changes).length ||
       Object.keys(changes).some(
-        (k) => !["title", "prompt", "rule", "enabled", "cwd", "target_mode"].includes(k),
+        (k) =>
+          !["title", "session_title", "prompt", "rule", "enabled", "cwd", "target_mode"].includes(
+            k,
+          ),
       )
     )
       throw new Error(
-        "changes 支持 title、prompt、rule、enabled、cwd、target_mode；指定会话请用 transfer。",
+        "changes 支持 title、session_title、prompt、rule、enabled、cwd、target_mode；指定会话请用 transfer。",
       );
     if (changes.cwd !== undefined && (typeof changes.cwd !== "string" || !isAbsolute(changes.cwd)))
       throw new Error("cwd 必须是绝对路径。");
@@ -153,6 +160,8 @@ export class TaskCenter<A extends MaintenanceAgent> {
     if (changes.enabled !== undefined && typeof changes.enabled !== "boolean")
       throw new Error("enabled 必须为布尔值。");
     const normalized = structuredClone(changes) as TaskChanges;
+    if (changes.session_title !== undefined)
+      normalized.session_title = validateSessionTitle(changes.session_title);
     if (changes.rule !== undefined) normalized.rule = normalizeRule(changes.rule, this.now());
     const updated = this.store.transaction(() => {
       const target = this.task(id);
@@ -319,6 +328,11 @@ export class TaskCenter<A extends MaintenanceAgent> {
         task.preparing!.session_id = created.id;
       });
     }
+    await this.host.name(created.agent, task.session_title ?? task.title);
+    if (!(await this.host.flush(created.agent)))
+      throw new Error("新会话标题持久化未确认，尚未转交或投递。");
+    task = this.task(id);
+    if (this.stopped || !task.enabled || task.revision !== revision) return;
     const moved = await this.host.handoff(task.feishu_bindings, created.id);
     task = this.task(id);
     if (this.stopped || !task.enabled || task.revision !== revision) return;

@@ -20,6 +20,14 @@ export async function installSessionServices(ctx, load, root) {
     }
   }
   new Query(ctx);
+  // Without an explicit title, plugin-source prompts must not trigger human-prompt naming.
+  await ctx
+    .plugin((await load("dsh-session-title")).default, {
+      fallbackMaxWords: 10,
+      fallbackMaxBytes: 100,
+      maxTitleBytes: 1024,
+    })
+    .await();
   ctx.provide("agentDefaultModel", {
     currentSelection: () => ({ provider: "test", model: "test" }),
     saveSelection: async () => {},

@@ -50,6 +50,7 @@ export const inject = [
   "sessionController",
   "sessionQuery",
   "workspaceRegistry",
+  "sessionTitle",
 ];
 const string = (description: string): StringValueSchemaSpec => ({ type: "string", description });
 const required = (description: string): ParameterPropertySpec => ({
@@ -152,6 +153,9 @@ export function apply(ctx: Context) {
       "创建全局定时任务：指定会话（默认当前）或每次触发创建新会话。归档/删除指定会话不会取消任务。保存工作目录与完整 prompt；关联的飞书订阅随目标转交。",
       {
         title: required("任务名称"),
+        session_title: string(
+          "由创建者指定的新会话标题，1–200 字符单行；省略使用任务名称。用于每次新建及归档/删除后的替代会话，不修改已有目标会话的名称。",
+        ),
         prompt: required("到期交给模型的完整指令"),
         rule: ruleSchema,
         target_mode: {
@@ -213,6 +217,7 @@ export function apply(ctx: Context) {
           additionalProperties: false,
           properties: {
             title: string("新名称"),
+            session_title: string("未来新建或替代会话的标题；不会重命名已有会话。"),
             prompt: string("新指令"),
             enabled: { type: "boolean" },
             cwd: string("新建或替代会话的绝对工作目录。"),
