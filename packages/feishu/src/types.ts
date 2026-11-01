@@ -72,9 +72,31 @@ export interface Outbound {
   content: string;
   card_id?: string;
   created_at: number;
-  state: "sending" | "sent" | "uncertain";
+  state: "sending" | "sent" | "uncertain" | "failed";
   message_id?: string;
   message_ids?: string[];
+  image_path?: string;
+  image_sha256?: string;
+  image_key?: string;
+  error?: string;
+}
+
+export interface AlertInput {
+  source: "task-center" | "feishu";
+  key: string;
+  message: string;
+  channel_ids?: string[];
+}
+export interface Alert {
+  id: string;
+  channel_id: string;
+  source: AlertInput["source"];
+  key: string;
+  message: string;
+  created_at: number;
+  state: "pending" | "sending" | "sent" | "uncertain";
+  message_id?: string;
+  error?: string;
 }
 
 export interface StoreData {
@@ -84,6 +106,7 @@ export interface StoreData {
   cards: Card[];
   outbound: Outbound[];
   seen: string[];
+  alerts?: Alert[];
 }
 
 export interface MaintenanceAgent {

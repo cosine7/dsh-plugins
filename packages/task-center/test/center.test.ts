@@ -297,21 +297,121 @@ test("I/O failures never count as deletion or create a replacement", async (t) =
   expect(f.deliveries).toHaveLength(0);
 });
 
-test("preparation survives handoff failure without creating another Session", async (t) => {
+// Failure modes: optional Feishu downtime blocks execution, a failed handoff is
+// hidden from the Agent/history, or a delivered occurrence is retried twice.
+test("handoff failure is durable and visible without blocking or duplicating task delivery", async (t) => {
   const f = fixture(t),
     task = create(f.center);
+  f.center.task(task.id).feishu_bindings = [{ channel_id: "bot", session_id: "B", revision: 3 }];
   f.archived.add("B");
   f.advance(20 * 60000);
-  const handoff = f.host.handoff.bind(f.host);
   f.host.handoff = async () => {
     throw new Error("subscription changed");
   };
-  await expect(f.center.prepareAndDispatch(task.id)).rejects.toThrow("subscription changed");
-  const preparing = f.center.task(task.id).preparing!.session_id;
-  f.host.handoff = handoff;
   await f.center.prepareAndDispatch(task.id);
-  expect(f.deliveries[0].id).toBe(preparing);
+  const target = f.deliveries[0].id;
+  expect(f.deliveries[0].text).toContain("飞书订阅转交失败");
+  expect(f.deliveries[0].text).toContain("subscription changed");
+  expect(f.center.task(task.id).feishu_handoff).toMatchObject({
+    state: "failed",
+    target_session_id: target,
+    error: "subscription changed",
+  });
+  expect(f.store.data.history[0].feishu_handoff).toEqual(f.center.task(task.id).feishu_handoff);
+  expect(JSON.parse(fs.readFileSync(f.store.file, "utf8")).tasks[0].feishu_handoff.state).toBe(
+    "failed",
+  );
+  await f.center.prepareAndDispatch(task.id);
+  expect(f.deliveries).toHaveLength(1);
   expect(f.agents.size).toBe(3);
+});
+
+test("task transfer only moves Feishu channels when explicitly selected", async (t) => {
+  const f = fixture(t),
+    task = create(f.center);
+  f.center.task(task.id).feishu_bindings = [{ channel_id: "bot", session_id: "B", revision: 3 }];
+  let handoffs = 0;
+  const handoff = f.host.handoff.bind(f.host);
+  f.host.handoff = async (...args) => {
+    handoffs++;
+    return handoff(...args);
+  };
+  const moved = await f.center.transfer(task.id, 1, "A");
+  expect(handoffs).toBe(0);
+  expect(moved.feishu_bindings).toEqual([]);
+  const linked = await f.center.transfer(task.id, moved.revision, "B", [
+    { channel_id: "bot", session_id: "A", revision: 4 },
+  ]);
+  expect(handoffs).toBe(1);
+  expect(linked.feishu_handoff?.state).toBe("succeeded");
+  expect(linked.feishu_bindings[0].session_id).toBe("B");
+});
+
+test("manual handoff failure returns the moved task and its independent Feishu status", async (t) => {
+  const f = fixture(t),
+    task = create(f.center);
+  f.host.handoff = async () => {
+    throw new Error("plugin unavailable");
+  };
+  const moved = await f.center.transfer(task.id, 1, "A", [
+    { channel_id: "bot", session_id: "B", revision: 3 },
+  ]);
+  expect(moved.target_session_id).toBe("A");
+  expect(moved.feishu_handoff).toMatchObject({ state: "failed", error: "plugin unavailable" });
+});
+
+test("unlinked new Sessions never call the optional Feishu service", async (t) => {
+  const f = fixture(t);
+  f.host.handoff = async () => {
+    throw new Error("must not call");
+  };
+  const task = f.center.create(
+    {
+      title: "independent",
+      prompt: "run",
+      cwd: "C:/test",
+      target_mode: "new",
+      rule: { kind: "interval", every_minutes: 20 },
+    },
+    "B",
+  );
+  f.advance(20 * 60000);
+  await f.center.prepareAndDispatch(task.id);
+  expect(f.deliveries).toHaveLength(1);
+  expect(f.deliveries[0].text).not.toContain("飞书订阅转交失败");
+  expect(f.center.task(task.id).feishu_handoff).toBeUndefined();
+});
+
+test("clearing optional bindings removes stale failure status before rearming a new Session", async (t) => {
+  const f = fixture(t),
+    task = create(f.center);
+  f.center.task(task.id).feishu_bindings = [{ channel_id: "bot", session_id: "B", revision: 3 }];
+  f.center.task(task.id).preparing = { session_id: "old-prepared", occurrence_at: task.next_at! };
+  f.center.task(task.id).feishu_handoff = {
+    state: "failed",
+    target_session_id: "old-prepared",
+    channel_ids: ["bot"],
+    error: "old failure",
+  };
+  const updated = f.center.update(task.id, task.revision, {
+    target_mode: "new",
+    feishu_bindings: [],
+    rule: { kind: "once", at: "2026-09-10T00:01:00Z" },
+  });
+  expect(updated.preparing).toBeUndefined();
+  expect(updated.feishu_handoff).toBeUndefined();
+  f.advance(60000);
+  await f.center.prepareAndDispatch(task.id);
+  expect(f.deliveries[0].id).not.toBe("old-prepared");
+  expect(f.center.task(task.id).next_at).toBeNull();
+});
+
+test("invalid optional bindings are rejected before mutating persisted tasks", (t) => {
+  const f = fixture(t),
+    task = create(f.center);
+  expect(() => f.center.update(task.id, 1, { feishu_bindings: null })).toThrow(/飞书关联/);
+  expect(f.center.task(task.id).revision).toBe(1);
+  expect(f.center.task(task.id).feishu_bindings).toEqual([]);
 });
 
 test("retargeting excludes concurrent mutation and dispatch until its handoff commits", async (t) => {

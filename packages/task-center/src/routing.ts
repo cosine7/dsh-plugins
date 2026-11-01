@@ -11,6 +11,12 @@ import { resolve as resolvePath } from "node:path";
 
 declare module "@deepseek-ai/cordis" {
   interface Events {
+    "cosine/plugin-alert"(request: {
+      source: "task-center" | "feishu";
+      key: string;
+      message: string;
+      channel_ids?: string[];
+    }): void;
     "cosine/feishu-bindings"(
       request: { sessionId: string },
       next: () => Promise<FeishuBinding[]>,
@@ -47,6 +53,13 @@ export function sessionRouting(ctx: Context) {
     return result.agent;
   };
   return {
+    notify: (key: string, message: string, channelIds?: string[]) =>
+      ctx.parallel("cosine/plugin-alert", {
+        source: "task-center",
+        key,
+        message,
+        ...(channelIds?.length ? { channel_ids: channelIds } : {}),
+      }),
     describe,
     resolve,
     archived,
@@ -79,7 +92,7 @@ export function sessionRouting(ctx: Context) {
     handoff: (bindings: FeishuBinding[], targetSessionId: string) => {
       if (!bindings.length) return Promise.resolve([]);
       return ctx.waterfall("cosine/feishu-handoff", { bindings, targetSessionId }, async () => {
-        throw new Error("任务关联了飞书通道，但飞书插件不可用；尚未投递。");
+        throw new Error("任务关联了飞书通道，但飞书插件不可用。");
       });
     },
   };

@@ -20,7 +20,7 @@ import { Store } from "./store.js";
 import { Bridge } from "./bridge.js";
 import { Transport } from "./transport.js";
 import { Setup } from "./setup.js";
-import { safeError } from "./types.js";
+import { safeError, type AlertInput } from "./types.js";
 
 declare module "@deepseek-ai/dsh-llm" {
   interface MessageSourceMap {
@@ -34,6 +34,7 @@ declare module "@deepseek-ai/dsh-workspace/types" {
 }
 declare module "@deepseek-ai/cordis" {
   interface Events {
+    "cosine/plugin-alert"(request: AlertInput): void;
     "cosine/feishu-bindings"(
       request: { sessionId: string },
       next: () => Promise<{ channel_id: string; session_id: string; revision: number }[]>,
@@ -259,6 +260,40 @@ export function apply(ctx: Context) {
         ),
     ],
     [
+      "feishu_send_image",
+      "通过 SDK 上传并发送本地图片，不需要 CLI。仅当前订阅 Session 可发送；图片非空且不超过10 MiB。提供稳定 request_id，相同 ID 的记录不会重发；uncertain 先核对手机记录。",
+      {
+        channel_id: channel,
+        image_path: string(
+          "本地图片绝对路径；支持 JPG/JPEG、PNG、WEBP、GIF、BMP、ICO、TIFF、HEIC。",
+          true,
+        ),
+        request_id: string("1–50 位英文、数字、连字符或下划线；同一图片请求保持不变。"),
+      },
+      (args, current) =>
+        transport.sendImage(
+          args.channel_id as string,
+          current,
+          args.image_path as string,
+          args.request_id as string | undefined,
+        ),
+    ],
+    [
+      "feishu_alerts",
+      "查看插件主动异常通知及 pending/sending/sent/uncertain 状态，所有 Session 可查看。sent 只代表飞书接收；uncertain 不自动重发。",
+      { channel_id: string("可选通道 ID"), state: string("可选通知状态") },
+      (args) =>
+        structuredClone(
+          (bridge.store.data.alerts ?? [])
+            .filter(
+              (a) =>
+                (!args.channel_id || a.channel_id === args.channel_id) &&
+                (!args.state || a.state === args.state),
+            )
+            .slice(-200),
+        ),
+    ],
+    [
       "feishu_send_card",
       "发送带按钮的确认卡片。必须由 Agent 明确指定 expires_at；点击仅投递意愿，实际操作需按当前条件重新判断。",
       {
@@ -332,7 +367,7 @@ export function apply(ctx: Context) {
     ],
     [
       "feishu_outbound",
-      "查看发送记录，所有 Session 可查看；sending/uncertain 不代表发送失败。",
+      "查看文字、图片与卡片发送记录。所有 Session 可查看；sending/uncertain 不代表失败；failed 表示尚未提交消息，修正原因后可用新 request_id 重试。图片记录含路径、指纹和 image_key。",
       { channel_id: string("可选通道 ID") },
       (args) =>
         structuredClone(
@@ -388,6 +423,7 @@ export function apply(ctx: Context) {
                     "feishu_cards",
                     "feishu_events",
                     "feishu_outbound",
+                    "feishu_alerts",
                   ].includes(toolName)
                     ? "read"
                     : "other",
@@ -421,6 +457,7 @@ export function apply(ctx: Context) {
       ctx.on("agent/disposed", () => bridge.kick()),
       ctx.on("workspace/session-stop", ({ sessionId }) => bridge.stopSession(String(sessionId))),
       ctx.on("cosine/feishu-bindings", async ({ sessionId }) => bridge.bindings(sessionId)),
+      ctx.on("cosine/plugin-alert", (request) => bridge.reportAlert(request)),
       ctx.on("cosine/feishu-handoff", async ({ bindings, targetSessionId }) =>
         bridge.handoff(bindings, targetSessionId),
       ),

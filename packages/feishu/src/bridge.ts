@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { Store } from "./store.js";
 import { renderCard, deadline, choices } from "./cards.js";
@@ -11,6 +11,7 @@ import {
   type IncomingMessage,
   type Host,
   type MaintenanceAgent,
+  type AlertInput,
 } from "./types.js";
 
 export class Bridge<A extends MaintenanceAgent> {
@@ -26,6 +27,7 @@ export class Bridge<A extends MaintenanceAgent> {
   });
   onCardsChanged: () => void = () => {};
   onProcessingChanged: () => void = () => {};
+  onAlertsChanged: () => void = () => {};
 
   constructor(
     readonly store: Store,
@@ -46,6 +48,51 @@ export class Bridge<A extends MaintenanceAgent> {
   checkRevision(channel: Channel, revision: unknown) {
     if (!Number.isInteger(revision) || revision !== channel.revision)
       throw new Error("订阅已变化，请先查看最新 revision。");
+  }
+
+  /** Operational notices go to authorized users independently of Session subscriptions. */
+  reportAlert(input: AlertInput) {
+    if (this.stopped) return;
+    const candidates = this.store.data.channels
+      .filter(
+        (channel) =>
+          channel.enabled && (!input.channel_ids || input.channel_ids.includes(channel.id)),
+      )
+      .map((channel) => ({
+        channel,
+        id: createHash("sha256")
+          .update(`${channel.id}:${input.source}:${input.key}`)
+          .digest("hex")
+          .slice(0, 48),
+      }))
+      .filter(({ id }) => !this.store.data.alerts?.some((alert) => alert.id === id));
+    if (!candidates.length) return;
+    try {
+      this.store.transaction((data) => {
+        const oldSent = (data.alerts ?? []).filter((a) => a.state === "sent").slice(0, -200);
+        const expired = new Set(oldSent.map((a) => a.id));
+        const alerts = (data.alerts = (data.alerts ?? []).filter((a) => !expired.has(a.id)));
+        for (const { channel, id } of candidates) {
+          if (alerts.length >= 2000) {
+            this.host.warn("feishu: 异常通知记录已达2000条，请检查未处理故障。");
+            break;
+          }
+          alerts.push({
+            id,
+            channel_id: channel.id,
+            source: input.source,
+            key: input.key,
+            message: input.message.slice(0, 4000),
+            created_at: this.now(),
+            state: "pending",
+          });
+        }
+      });
+    } catch {
+      this.host.warn("feishu: 异常通知无法持久化，请检查磁盘；不影响原事件的处理结果。");
+      return;
+    }
+    this.onAlertsChanged();
   }
   requireOwner(id: string, sessionId: string): Channel {
     const channel = this.channel(id);
@@ -104,6 +151,7 @@ export class Bridge<A extends MaintenanceAgent> {
     if (!this.host.get(sessionId)) throw new Error("目标必须是已加载的活动根 Session。");
     if (channel.session_id && channel.session_id !== sessionId && !transfer)
       throw new Error("通道已有订阅者，请明确调用 feishu_transfer 转交。");
+    if (channel.session_id === sessionId) return structuredClone(channel);
     this.store.transaction(() => {
       channel.session_id = sessionId;
       delete channel.archived_subscription;
@@ -437,6 +485,13 @@ export class Bridge<A extends MaintenanceAgent> {
           const task = this.dispatch(channel.id, agent)
             .catch(() => {
               this.host.warn("feishu: 会话投递暂时失败，将保留事件重试。");
+              this.reportAlert({
+                source: "feishu",
+                key: `dispatch:${channel.id}:${this.store.data.events.find((e) => e.channel_id === channel.id && e.state === "pending")?.id ?? "pending"}`,
+                channel_ids: [channel.id],
+                message:
+                  "飞书事件向 Session 投递失败，已保留事件等待重试。请检查目标会话与磁盘持久化状态。",
+              });
               this.retryLater();
             })
             .finally(() => {
@@ -515,6 +570,12 @@ export class Bridge<A extends MaintenanceAgent> {
             this.host.warn(
               `feishu: 事件 ${event.id} 投递结果不确定，请检查会话记录；不会自动重复投递。`,
             );
+            this.reportAlert({
+              source: "feishu",
+              key: `uncertain:${event.id}`,
+              channel_ids: [channelId],
+              message: `飞书事件投递结果不确定，不会自动重复投递。\n事件 ID：${event.id}\nSession：${target}\n请核对会话记录。`,
+            });
           }
         }
       });

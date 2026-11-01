@@ -32,6 +32,9 @@ export class Store {
       for (const outbound of this.data.outbound) {
         if (outbound.state === "sending") outbound.state = "uncertain";
       }
+      for (const alert of this.data.alerts ?? []) {
+        if (alert.state === "sending") alert.state = "uncertain";
+      }
       this.save();
     } catch (error) {
       this.close();
@@ -115,6 +118,21 @@ function validData(value: unknown): value is StoreData {
     if (!Array.isArray(value[key])) return false;
   const { channels, events, cards, outbound, seen } = value as unknown as StoreData;
   return (
+    (value.alerts === undefined ||
+      (Array.isArray(value.alerts) &&
+        value.alerts.every(
+          (a: unknown) =>
+            record(a) &&
+            typeof a.id === "string" &&
+            typeof a.channel_id === "string" &&
+            ["task-center", "feishu"].includes(String(a.source)) &&
+            typeof a.key === "string" &&
+            typeof a.message === "string" &&
+            Number.isFinite(a.created_at) &&
+            ["pending", "sending", "sent", "uncertain"].includes(String(a.state)) &&
+            (a.message_id === undefined || typeof a.message_id === "string") &&
+            (a.error === undefined || typeof a.error === "string"),
+        ))) &&
     channels.every(
       (c) =>
         record(c) &&
@@ -198,7 +216,11 @@ function validData(value: unknown): value is StoreData {
         typeof o.content === "string" &&
         (o.message_ids === undefined ||
           (Array.isArray(o.message_ids) && o.message_ids.every((id) => typeof id === "string"))) &&
-        ["sending", "sent", "uncertain"].includes(o.state),
+        (o.image_path === undefined || typeof o.image_path === "string") &&
+        (o.image_sha256 === undefined || typeof o.image_sha256 === "string") &&
+        (o.image_key === undefined || typeof o.image_key === "string") &&
+        (o.error === undefined || typeof o.error === "string") &&
+        ["sending", "sent", "uncertain", "failed"].includes(o.state),
     ) &&
     seen.every((k) => typeof k === "string")
   );

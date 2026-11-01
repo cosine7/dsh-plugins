@@ -123,6 +123,21 @@ test("one subscriber, explicit transfer and optimistic revisions", () => {
   expect(() => f.bridge.unsubscribe(first.id, first.revision)).toThrow("revision");
   expect(() => f.bridge.subscribe(first.id, "cold", moved.revision)).toThrow("已加载");
 });
+
+// Failure modes: a no-op invalidates scheduled bindings; a stale caller steals a
+// different subscriber; a real ownership change fails to advance the revision.
+test("subscribing or transferring to the current owner preserves bindings and revision", () => {
+  const f = fixture();
+  const first = f.subscribe();
+  const bindings = f.bridge.bindings("A");
+  expect(f.bridge.subscribe(first.id, "A", first.revision)).toEqual(first);
+  expect(f.bridge.subscribe(first.id, "A", first.revision, true)).toEqual(first);
+  expect(f.bridge.bindings("A")).toEqual(bindings);
+  const moved = f.bridge.handoff(bindings, "B");
+  expect(moved[0].revision).toBe(first.revision + 1);
+  expect(() => f.bridge.subscribe(first.id, "A", first.revision, true)).toThrow("revision");
+  expect(() => f.bridge.handoff(bindings, "A")).toThrow("主动修改");
+});
 test("a card created by A follows the current subscriber B with full context", async () => {
   const f = fixture();
   f.subscribe();

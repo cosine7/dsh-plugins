@@ -3,12 +3,14 @@ import {
   isRecord,
   errorMessage,
   validateSessionTitle,
+  validBindings,
   type Task,
   type CreateTaskInput,
   type TaskChanges,
   type TaskCenterHost,
   type MaintenanceAgent,
   type FeishuBinding,
+  type FeishuHandoff,
 } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -90,6 +92,8 @@ export class TaskCenter<A extends MaintenanceAgent> {
     const target = args.target_session_id ?? currentSession;
     if (typeof target !== "string" || !target.trim()) throw new Error("需要有效目标会话。");
     const rule = normalizeRule(args.rule, this.now());
+    if (args.feishu_bindings !== undefined && !validBindings(args.feishu_bindings))
+      throw new Error("飞书关联格式无效。");
     const next = nextOccurrence(rule, this.now());
     if (next === null) throw new Error("规则没有未来触发时间。");
     const task: Task = {
@@ -127,9 +131,16 @@ export class TaskCenter<A extends MaintenanceAgent> {
       !Object.keys(changes).length ||
       Object.keys(changes).some(
         (k) =>
-          !["title", "session_title", "prompt", "rule", "enabled", "cwd", "target_mode"].includes(
-            k,
-          ),
+          ![
+            "title",
+            "session_title",
+            "prompt",
+            "rule",
+            "enabled",
+            "cwd",
+            "target_mode",
+            "feishu_bindings",
+          ].includes(k),
       )
     )
       throw new Error(
@@ -160,12 +171,15 @@ export class TaskCenter<A extends MaintenanceAgent> {
     if (changes.enabled !== undefined && typeof changes.enabled !== "boolean")
       throw new Error("enabled 必须为布尔值。");
     const normalized = structuredClone(changes) as TaskChanges;
+    if (changes.feishu_bindings !== undefined && !validBindings(changes.feishu_bindings))
+      throw new Error("飞书关联格式无效。");
     if (changes.session_title !== undefined)
       normalized.session_title = validateSessionTitle(changes.session_title);
     if (changes.rule !== undefined) normalized.rule = normalizeRule(changes.rule, this.now());
     const updated = this.store.transaction(() => {
       const target = this.task(id);
       Object.assign(target, normalized);
+      if (changes.feishu_bindings !== undefined) delete target.feishu_handoff;
       if (changes.target_mode === "new") delete target.target_session_id;
       if (changes.target_mode !== undefined || changes.cwd !== undefined) delete target.preparing;
       target.revision++;
@@ -180,7 +194,42 @@ export class TaskCenter<A extends MaintenanceAgent> {
     this.kick();
     return this.view(updated);
   }
-  async transfer(id: string, revision: number, target: string, bindings?: FeishuBinding[]) {
+  private async handoff(
+    bindings: FeishuBinding[],
+    target: string,
+    task: Task,
+  ): Promise<{
+    bindings: FeishuBinding[];
+    status?: FeishuHandoff;
+  }> {
+    if (!bindings.length) return { bindings: [] };
+    const status = { target_session_id: target, channel_ids: bindings.map((b) => b.channel_id) };
+    try {
+      return {
+        bindings: await this.host.handoff(bindings, target),
+        status: { ...status, state: "succeeded" },
+      };
+    } catch (error) {
+      const message = errorMessage(error);
+      this.host.warn(`task-center: 飞书订阅转交失败，任务仍会投递：${message}`);
+      this.notify(
+        `handoff:${task.id}:${task.next_at}:${target}`,
+        `任务的飞书联动失败，任务仍继续投递。\n任务：${task.title}\n任务 ID：${task.id}\n目标 Session：${target}\n${message}`,
+        status.channel_ids,
+      );
+      return { bindings, status: { ...status, state: "failed", error: message } };
+    }
+  }
+  private notify(key: string, message: string, channelIds?: string[]) {
+    try {
+      void this.host.notify?.(key, message, channelIds)?.catch(() => {
+        this.host.warn("task-center: 异常通知未能交给飞书插件，请检查本地日志。");
+      });
+    } catch {
+      this.host.warn("task-center: 异常通知不可用，请检查本地日志。");
+    }
+  }
+  async transfer(id: string, revision: number, target: string, bindings: FeishuBinding[] = []) {
     const task = this.task(id);
     this.check(task, revision);
     if (this.pending.has(id) || this.mutating.has(id))
@@ -192,13 +241,15 @@ export class TaskCenter<A extends MaintenanceAgent> {
       this.check(this.task(id), revision);
       const agent = await this.host.resolve(target);
       if (!agent || this.host.archived(target)) throw new Error("目标会话不可用。");
-      const moved = await this.host.handoff(bindings ?? task.feishu_bindings, target);
+      const moved = await this.handoff(bindings, target, task);
       const updated = this.store.transaction(() => {
         const current = this.task(id);
         current.target_session_id = target;
         current.target_mode = "session";
         current.cwd = info.cwd ?? current.cwd;
-        current.feishu_bindings = moved;
+        current.feishu_bindings = moved.bindings;
+        if (moved.status) current.feishu_handoff = moved.status;
+        else delete current.feishu_handoff;
         delete current.preparing;
         current.revision++;
         return current;
@@ -237,6 +288,11 @@ export class TaskCenter<A extends MaintenanceAgent> {
     clearTimeout(this.timer);
     let delay = 60000;
     for (const task of this.store.data.tasks) {
+      if (task.dispatching && !task.enabled && task.error)
+        this.notify(
+          `uncertain:${task.id}:${task.dispatching.id}`,
+          `任务投递结果不确定，已暂停以防重复执行。\n任务：${task.title}\n任务 ID：${task.id}\nSession：${task.dispatching.target_session_id}\n请检查会话记录和任务状态后再决定是否恢复。`,
+        );
       if (
         !task.enabled ||
         task.dispatching ||
@@ -259,6 +315,10 @@ export class TaskCenter<A extends MaintenanceAgent> {
       this.pending.set(task.id, operation);
       void operation
         .catch((e) => {
+          this.notify(
+            `prepare:${task.id}:${task.next_at}`,
+            `任务调度或会话准备失败，将保留任务并稍后重试。\n任务：${task.title}\n任务 ID：${task.id}\n${errorMessage(e)}`,
+          );
           this.retryAt.set(task.id, this.now() + 60000);
           try {
             if (this.store.data.tasks.some((t) => t.id === task.id))
@@ -333,11 +393,13 @@ export class TaskCenter<A extends MaintenanceAgent> {
       throw new Error("新会话标题持久化未确认，尚未转交或投递。");
     task = this.task(id);
     if (this.stopped || !task.enabled || task.revision !== revision) return;
-    const moved = await this.host.handoff(task.feishu_bindings, created.id);
+    const moved = await this.handoff(task.feishu_bindings, created.id, task);
     task = this.task(id);
     if (this.stopped || !task.enabled || task.revision !== revision) return;
     this.store.transaction(() => {
-      task.feishu_bindings = moved;
+      task.feishu_bindings = moved.bindings;
+      if (moved.status) task.feishu_handoff = moved.status;
+      else delete task.feishu_handoff;
       if (task.target_mode === "session" && task.target_session_id !== created.id) {
         task.target_session_id = created.id;
         task.revision++;
@@ -386,6 +448,10 @@ export class TaskCenter<A extends MaintenanceAgent> {
           occurrence_at: occurrence,
           target_session_id: task.preparing?.session_id ?? task.target_session_id!,
           accepted_at: accepted,
+          ...(task.feishu_handoff?.target_session_id ===
+          (task.preparing?.session_id ?? task.target_session_id)
+            ? { feishu_handoff: structuredClone(task.feishu_handoff) }
+            : {}),
           ...(task.preparing?.original_session_id
             ? {
                 original_session_id: task.preparing.original_session_id,
@@ -402,7 +468,7 @@ export class TaskCenter<A extends MaintenanceAgent> {
         try {
           this.host.deliver(
             agent,
-            `[Task Center: ${task.title}]\nTask ID: ${id}\nOccurrence: ${new Date(occurrence).toISOString()}\nDelivery ID: ${marker.id}\n\n${task.preparing?.original_session_id ? `本任务原计划投递到 ${task.preparing.original_session_id}，但该会话${task.preparing.reason === "archived" ? "已归档。原会话历史仍保留，如有可用的会话搜索或读取工具，可以按上述 Session ID 查阅；不要解除归档或恢复运行原会话。" : "已不存在，无法依赖原会话历史。"}\n因此改由当前新会话执行，未继承原会话上下文。\n\n原任务指令：\n` : ""}${task.prompt}`,
+            `[Task Center: ${task.title}]\nTask ID: ${id}\nOccurrence: ${new Date(occurrence).toISOString()}\nDelivery ID: ${marker.id}\n\n${marker.feishu_handoff?.state === "failed" ? `飞书订阅转交失败：${marker.feishu_handoff.error}\n通道：${marker.feishu_handoff.channel_ids.join(", ")}\n任务仍正常投递。当前会话不一定拥有飞书订阅；先核对 feishu_status，必要时按用户意图显式转交。不要声称已通过飞书发送消息。\n\n` : ""}${task.preparing?.original_session_id ? `本任务原计划投递到 ${task.preparing.original_session_id}，但该会话${task.preparing.reason === "archived" ? "已归档。原会话历史仍保留，如有可用的会话搜索或读取工具，可以按上述 Session ID 查阅；不要解除归档或恢复运行原会话。" : "已不存在，无法依赖原会话历史。"}\n因此改由当前新会话执行，未继承原会话上下文。\n\n原任务指令：\n` : ""}${task.prompt}`,
           );
           if (!(await this.host.flush(agent))) throw new Error("投递后的持久化未确认。");
           this.store.transaction((data) => {
@@ -420,6 +486,10 @@ export class TaskCenter<A extends MaintenanceAgent> {
             return true;
           });
         } catch (error) {
+          this.notify(
+            `uncertain:${task.id}:${marker.id}`,
+            `任务投递结果不确定，停止自动重投。\n任务：${task.title}\n任务 ID：${id}\nSession：${marker.target_session_id}\n请核对会话历史后再恢复任务。`,
+          );
           this.store.transaction((data) => {
             const current = data.tasks.find((t) => t.id === id);
             if (current) {

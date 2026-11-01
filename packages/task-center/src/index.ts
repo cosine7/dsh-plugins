@@ -19,7 +19,7 @@ import type {
   ParameterPropertySpec,
   StringValueSchemaSpec,
 } from "@deepseek-ai/dsh-tools";
-import { errorMessage } from "./types.js";
+import { errorMessage, isRecord } from "./types.js";
 import { isAbsolute } from "node:path";
 import { sessionRouting } from "./routing.js";
 
@@ -118,6 +118,26 @@ export function apply(ctx: Context) {
     return;
   }
   const sessionId = (agent: Agent) => String(agent.session.id ?? agent.id);
+  const selectedBindings = async (selected: unknown, source: string) => {
+    if (selected === undefined) return [];
+    if (
+      !Array.isArray(selected) ||
+      selected.some((id) => typeof id !== "string") ||
+      new Set(selected).size !== selected.length
+    )
+      throw new Error("feishu_channel_ids 必须是不重复的通道 ID 数组。");
+    if (!selected.length) return [];
+    const available = await routing.bindings(source);
+    if (selected.some((id) => !available.some((b) => b.channel_id === id)))
+      throw new Error("只能关联源会话当前拥有的飞书通道。");
+    return available.filter((b) => selected.includes(b.channel_id));
+  };
+  const channelSelection = {
+    type: "array" as const,
+    items: { type: "string" as const },
+    description:
+      "显式选择需要随目标转交的飞书通道 ID；省略或空数组不关联、不操作飞书。只能选择源会话当前拥有的通道。转交失败会报告，但不阻止任务投递。",
+  };
   const definitions: ToolDefinition[] = [
     [
       "task_center_preview",
@@ -150,7 +170,7 @@ export function apply(ctx: Context) {
     ],
     [
       "task_center_create",
-      "创建全局定时任务：指定会话（默认当前）或每次触发创建新会话。归档/删除指定会话不会取消任务。保存工作目录与完整 prompt；关联的飞书订阅随目标转交。",
+      "创建全局定时任务：指定会话（默认当前）或每次触发创建新会话。归档/删除指定会话不会取消任务。默认不操作飞书，需通过 feishu_channel_ids 显式选择联动。",
       {
         title: required("任务名称"),
         session_title: string(
@@ -165,12 +185,7 @@ export function apply(ctx: Context) {
         },
         target_session_id: string("session 模式目标 ID，省略为当前会话。"),
         cwd: string("绝对工作目录，默认目标/当前会话的目录；新会话仅设置 cwd 和普通任务消息。"),
-        feishu_channel_ids: {
-          type: "array",
-          items: { type: "string" },
-          description:
-            "关联并随执行目标转交的飞书通道；省略继承源会话当前订阅，空数组不关联。只能选择源会话拥有的通道。",
-        },
+        feishu_channel_ids: channelSelection,
       },
       async (args, agent) => {
         if (args.target_session_id !== undefined && typeof args.target_session_id !== "string")
@@ -182,24 +197,11 @@ export function apply(ctx: Context) {
         const info = await routing.describe(source);
         const cwd = args.cwd ?? info.cwd ?? agent.session.header.cwd ?? process.cwd();
         if (typeof cwd !== "string" || !isAbsolute(cwd)) throw new Error("cwd 必须是绝对路径。");
-        const available = await routing.bindings(source);
-        const selected = args.feishu_channel_ids;
-        if (
-          selected !== undefined &&
-          (!Array.isArray(selected) ||
-            selected.some(
-              (id) => typeof id !== "string" || !available.some((b) => b.channel_id === id),
-            ))
-        )
-          throw new Error("只能关联源会话当前拥有的飞书通道。");
         return center.create(
           {
             ...args,
             cwd,
-            feishu_bindings:
-              selected === undefined
-                ? available
-                : available.filter((b) => (selected as string[]).includes(b.channel_id)),
+            feishu_bindings: await selectedBindings(args.feishu_channel_ids, source),
           },
           sessionId(agent),
         );
@@ -226,25 +228,39 @@ export function apply(ctx: Context) {
               enum: ["session", "new"],
               description: "切换为每次新建；指定复用目标请用 transfer。",
             },
+            feishu_channel_ids: {
+              ...channelSelection,
+              description:
+                "未来新建/替代会话的飞书关联；省略保持原设置，空数组解除关联。选择当前调用会话拥有的通道，不立即转交。",
+            },
             rule: Object.fromEntries(
               Object.entries(ruleSchema).filter(([key]) => key !== "required"),
             ) as ParameterPropertySpec,
           },
         },
       },
-      (args) => center.update(args.id as string, args.revision as number, args.changes),
+      async (args, agent) => {
+        if (!isRecord(args.changes)) throw new Error("changes 必须为对象。");
+        const { feishu_channel_ids, ...changes } = args.changes;
+        return center.update(args.id as string, args.revision as number, {
+          ...changes,
+          ...(feishu_channel_ids === undefined
+            ? {}
+            : { feishu_bindings: await selectedBindings(feishu_channel_ids, sessionId(agent)) }),
+        });
+      },
     ],
     [
       "task_center_transfer",
-      "把任务改为投递到指定的未归档会话，并转交关联的飞书订阅。省略目标表示当前会话；已投递消息不撤回。",
+      "把任务改为投递到指定的未归档会话。默认只转任务并解除原飞书关联；只有显式提供 feishu_channel_ids 才联动转交这些通道。省略目标表示当前会话；已投递消息不撤回。",
       {
         id: required("任务 ID"),
         revision,
         target_session_id: string("目标会话 ID，省略使用当前会话。"),
-        rebind_feishu: {
-          type: "boolean",
+        feishu_channel_ids: {
+          ...channelSelection,
           description:
-            "显式重新关联目标会话当前订阅的飞书通道，用于用户主动调整订阅后的重新关联；默认保留任务原关联。",
+            "需要同时转交并关联的通道 ID；源为任务原目标会话（new 模式为调用会话）。省略或空数组只转任务并解除原关联。",
         },
       },
       async (args, agent) =>
@@ -252,11 +268,10 @@ export function apply(ctx: Context) {
           args.id as string,
           args.revision as number,
           (args.target_session_id as string | undefined) ?? sessionId(agent),
-          args.rebind_feishu === true
-            ? await routing.bindings(
-                (args.target_session_id as string | undefined) ?? sessionId(agent),
-              )
-            : undefined,
+          await selectedBindings(
+            args.feishu_channel_ids,
+            center.task(args.id as string).target_session_id ?? sessionId(agent),
+          ),
         ),
     ],
     [

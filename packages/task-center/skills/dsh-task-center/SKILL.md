@@ -16,7 +16,11 @@ description: 通用全局定时任务中心：自然语言调度、cron、多个
 4. 修改、删除、转交前调用 task_center_list，使用精确 id 和最新 revision。发生 revision 冲突就重新读取，不覆盖别人刚做的修改。
 5. 用户说“转到这里/不要在 B 里跑”时，调用 task_center_transfer，省略 target_session_id 即当前会话；不是复制任务。转交其他会话需先 task_center_sessions 获取有效 ID。
 6. 可通过 update 的 target_mode=new 改为每次新建，改回指定会话使用 transfer。不要自行决定哪些日期共用会话；业务编排由调用者决定，插件只执行给定规则。
-7. 创建任务默认关联源会话当前拥有的飞书通道，也可指定 feishu_channel_ids 子集或空数组。关联会随新建、替代与 transfer 转交；如果用户已主动改过订阅，先核对，在目标会话显式 transfer 且 rebind_feishu=true 重新关联其当前通道，不绕过 revision 抢占订阅。
+7. 任务与飞书独立。create 的 feishu_channel_ids 省略或空数组均不关联；显式选择源会话拥有的通道后，才在新建/替代会话时尝试转交。update 的 changes.feishu_channel_ids 省略保持原设置、空数组解除关联、非空数组选择调用会话当前拥有的通道，只配置未来行为，不立即转交。
+8. transfer 默认只转任务并清除原任务的飞书关联，不改变飞书订阅；需要同时转交通道时显式提供 feishu_channel_ids，选择任务原目标当前拥有的通道（new 模式为调用会话）。也可由飞书插件单独执行转交。若联动已经成功，无需再调用 feishu_transfer。
+9. feishu_handoff 的 succeeded/failed 单独描述联动结果；failed 不等于任务失败。任务照常投递，消息会附失败原因；核对 feishu_status 后按用户意图处理，不因飞书失败重新创建/重复投递任务，不绕过订阅冲突保护。task_center_history 的 delivered 仍只代表任务已交给会话，不代表飞书已转交或业务已完成。
+
+安装并启用飞书插件后，任务调度/准备、投递不确定与联动失败也会直接通知授权用户，不需要 Session 订阅，不会为通知唤醒 Agent。普通任务异常通知所有已启用通道，联动失败只通知关联通道；通知状态通过 feishu_alerts 查看。飞书不可用或通知提交结果不确定时不能声称用户已收到；通知成功也不代表任务已恢复或业务成功。
 
 ## 时间规则
 

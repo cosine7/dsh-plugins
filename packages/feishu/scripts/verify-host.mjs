@@ -126,7 +126,7 @@ try {
   };
   assert.equal(
     a.agent.ctx.tools.schemas(a.agent).filter((t) => t.name.startsWith("feishu_")).length,
-    18,
+    20,
   );
   assert.equal((await invoke(a.agent, "feishu_status")).length, 0);
   assert.equal((await ctx.skills.get("dsh-feishu")).name, "dsh-feishu");

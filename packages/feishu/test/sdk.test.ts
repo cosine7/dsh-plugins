@@ -200,7 +200,13 @@ test("network uncertainty is durable, redacted and never automatically resent", 
   expect(f.bridge.store.data.outbound[0]?.state).toBe("uncertain");
   const retried = await f.transport.send(f.channel.id, "A", "hello", "uncertain");
   expect(retried.state).toBe("uncertain");
-  expect(f.requests.filter((r) => r.url?.includes("/im/v1/messages"))).toHaveLength(1);
+  // Operational notices use a separate UUID and must not count as resending this request.
+  expect(
+    f.requests.filter(
+      (r) =>
+        r.url?.includes("/im/v1/messages") && JSON.parse(r.data as string).uuid === "uncertain",
+    ),
+  ).toHaveLength(1);
   expect(readFileSync(f.bridge.store.file, "utf8")).not.toContain("PRIVATE_SECRET_SENTINEL");
 });
 test("real SDK EventDispatcher receives current text and card event envelopes", async () => {

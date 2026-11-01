@@ -242,10 +242,35 @@ try {
   };
   try {
     await workspace.attachSession(a.agent.session.id);
+    // Failure modes: a default create/transfer captures Feishu implicitly; callers
+    // cannot explicitly attach/detach channels; stale optional handoffs block work.
+    const independent = await invoke(a.agent, "task_center_create", {
+      title: "independent",
+      prompt: "not linked",
+      cwd: root,
+      target_mode: "new",
+      rule: { kind: "interval", every_minutes: 20 },
+    });
+    assert.deepEqual(independent.feishu_bindings, []);
+    const linked = await invoke(a.agent, "task_center_update", {
+      id: independent.id,
+      revision: independent.revision,
+      changes: { feishu_channel_ids: [bot.id] },
+    });
+    assert.equal(linked.feishu_bindings[0].channel_id, bot.id);
+    const onlyTask = await invoke(a.agent, "task_center_transfer", {
+      id: linked.id,
+      revision: linked.revision,
+      target_session_id: "compat-B",
+    });
+    assert.equal(feishu.channel(bot.id).session_id, "compat-A");
+    assert.deepEqual(onlyTask.feishu_bindings, []);
+    await invoke(a.agent, "task_center_delete", { id: onlyTask.id, revision: onlyTask.revision });
     const replacement = await invoke(a.agent, "task_center_create", {
       title: "archive replacement",
       prompt: "isolated archive task",
       cwd: root,
+      feishu_channel_ids: [bot.id],
       rule: { kind: "once", at: new Date(Date.now() + 350).toISOString() },
     });
     await ctx.workspaceRegistry.archiveSession(a.agent.id);
@@ -320,6 +345,31 @@ try {
       rule: { kind: "once", at: new Date(Date.now() + 200).toISOString() },
     });
     assert.equal((await waitHistory(missing.id))[0].replacement_reason, "missing");
+    const owner = ctx.agents.get(feishu.channel(bot.id).session_id);
+    const conflict = await invoke(owner, "task_center_create", {
+      title: "conflicting optional handoff",
+      prompt: "still execute despite Feishu conflict",
+      target_mode: "new",
+      cwd: root,
+      feishu_channel_ids: [bot.id],
+      rule: { kind: "once", at: new Date(Date.now() + 350).toISOString() },
+    });
+    const beforeNoop = feishu.channel(bot.id).revision;
+    feishu.subscribe(bot.id, owner.id, beforeNoop, true);
+    assert.equal(feishu.channel(bot.id).revision, beforeNoop);
+    feishu.subscribe(bot.id, "compat-B", beforeNoop, true);
+    const [conflictReceipt] = await waitHistory(conflict.id);
+    assert.equal(conflictReceipt.feishu_handoff.state, "failed");
+    assert.equal(feishu.channel(bot.id).session_id, "compat-B");
+    const failedReader = await ctx.sessionPersistence.open(
+      conflictReceipt.target_session_id,
+      "read",
+    );
+    try {
+      assert(JSON.stringify((await failedReader.read()).events).includes("飞书订阅转交失败"));
+    } finally {
+      await failedReader.close();
+    }
     console.log(
       "DSH host Session Controller: cold resume, archive replacement, missing replacement, new Session, durable creator titles, workspace membership and Feishu handoff passed.",
     );

@@ -37,6 +37,14 @@ export interface Delivery {
   accepted_at: number;
   original_session_id?: string;
   replacement_reason?: "archived" | "missing";
+  feishu_handoff?: FeishuHandoff;
+}
+
+export interface FeishuHandoff {
+  state: "succeeded" | "failed";
+  target_session_id: string;
+  channel_ids: string[];
+  error?: string;
 }
 
 export interface Task {
@@ -57,6 +65,7 @@ export interface Task {
   dispatching?: Delivery;
   last_delivery?: Delivery;
   error?: string;
+  feishu_handoff?: FeishuHandoff;
 }
 
 export interface HistoryEntry extends Delivery {
@@ -87,6 +96,7 @@ export interface TaskCenterHost<A extends MaintenanceAgent> {
   deliver(agent: A, text: string): unknown;
   detached?(operation: () => void): void;
   warn(text: string): void;
+  notify?(key: string, message: string, channelIds?: string[]): Promise<void>;
 }
 
 export interface CreateTaskInput {
@@ -108,6 +118,7 @@ export interface TaskChanges {
   enabled?: boolean;
   cwd?: string;
   target_mode?: "session" | "new";
+  feishu_bindings?: FeishuBinding[];
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -116,6 +127,34 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function validBindings(value: unknown): value is FeishuBinding[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (binding: unknown) =>
+        isRecord(binding) &&
+        typeof binding.channel_id === "string" &&
+        !!binding.channel_id &&
+        typeof binding.session_id === "string" &&
+        !!binding.session_id &&
+        Number.isInteger(binding.revision) &&
+        Number(binding.revision) > 0,
+    ) &&
+    new Set(value.map((binding) => binding.channel_id)).size === value.length
+  );
+}
+
+export function validHandoff(value: unknown): value is FeishuHandoff {
+  return (
+    isRecord(value) &&
+    ["succeeded", "failed"].includes(String(value.state)) &&
+    typeof value.target_session_id === "string" &&
+    Array.isArray(value.channel_ids) &&
+    value.channel_ids.every((id: unknown) => typeof id === "string") &&
+    (value.state !== "failed" || typeof value.error === "string")
+  );
 }
 
 export function validateSessionTitle(value: unknown): string {

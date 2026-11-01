@@ -4,6 +4,7 @@ import { credentialRef, type CredentialProvider } from "@deepseek-ai/dsh-credent
 import type { Bridge } from "./bridge.js";
 import { renderCard } from "./cards.js";
 import { markdownPost, splitMarkdown } from "./messages.js";
+import { readImage } from "./images.js";
 import {
   record,
   text,
@@ -18,6 +19,7 @@ export const requiredScopes = [
   "im:message:send_as_bot",
   "im:message.p2p_msg:readonly",
   "im:message.reactions:write_only",
+  "im:resource",
 ];
 export const requiredEvents = ["im.message.receive_v1"];
 export const requiredCallbacks = ["card.action.trigger"];
@@ -120,6 +122,9 @@ export class Transport<A extends MaintenanceAgent> {
   private processingSync?: Promise<void>;
   private processingRetry?: NodeJS.Timeout;
   private processingChanged = false;
+  private alertsSync?: Promise<void>;
+  private alertsRetry?: NodeJS.Timeout;
+  private alertsChanged = false;
 
   constructor(
     readonly bridge: Bridge<A>,
@@ -127,6 +132,8 @@ export class Transport<A extends MaintenanceAgent> {
   ) {
     bridge.onCardsChanged = () => this.syncCards();
     bridge.onProcessingChanged = () => this.syncProcessing();
+    bridge.onAlertsChanged = () => this.syncAlerts();
+    this.syncAlerts();
   }
   private readonly logger: lark.Logger = {
     debug() {},
@@ -214,14 +221,24 @@ export class Transport<A extends MaintenanceAgent> {
         delete runtime.error;
         this.syncCards();
         this.syncProcessing();
+        this.syncAlerts();
       },
       onReconnected: () => {
         delete runtime.error;
         this.syncCards();
         this.syncProcessing();
+        this.syncAlerts();
       },
       onError: () => {
+        if (this.stopped || this.runtimes.get(id) !== runtime) return;
         runtime.error = "长连接出现错误，请检查网络和飞书长连接配置。";
+        this.bridge.reportAlert({
+          source: "feishu",
+          key: `connection:${id}:${Math.floor(Date.now() / 3600000)}`,
+          channel_ids: [id],
+          message:
+            "飞书长连接出现错误，手机消息和卡片回调可能暂时无法送达。SDK 会尝试重连，请检查 feishu_check。",
+        });
       },
     });
     await runtime.ws.start({ eventDispatcher: dispatcher });
@@ -250,6 +267,12 @@ export class Transport<A extends MaintenanceAgent> {
               this.bridge.host.warn(
                 `feishu: 通道 ${channel.label} 尚未连接，请运行 feishu_check。`,
               );
+              this.bridge.reportAlert({
+                source: "feishu",
+                key: `connection:${channel.id}:${Math.floor(Date.now() / 3600000)}`,
+                channel_ids: [channel.id],
+                message: `飞书通道 ${channel.label} 连接失败，请检查网络、凭据及长连接配置。`,
+              });
             }
           }
         }
@@ -322,7 +345,26 @@ export class Transport<A extends MaintenanceAgent> {
     return result;
   }
 
-  async send(id: string, sessionId: string, content: string, requestId?: string, cardId?: string) {
+  async sendImage(id: string, sessionId: string, imagePath: string, requestId?: string) {
+    this.bridge.requireOwner(id, sessionId);
+    const image = await readImage(imagePath);
+    return this.send(
+      id,
+      sessionId,
+      JSON.stringify({ image_path: image.path, sha256: image.sha256 }),
+      requestId,
+      undefined,
+      image,
+    );
+  }
+  async send(
+    id: string,
+    sessionId: string,
+    content: string,
+    requestId?: string,
+    cardId?: string,
+    image?: Awaited<ReturnType<typeof readImage>>,
+  ) {
     this.bridge.requireOwner(id, sessionId);
     text(content, "消息内容", 30000);
     const uuid = requestId ?? randomUUID();
@@ -330,7 +372,12 @@ export class Transport<A extends MaintenanceAgent> {
       throw new Error("request_id 必须是 1–50 个英文字母、数字、连字符或下划线。");
     const existing = this.bridge.store.data.outbound.find((o) => o.id === uuid);
     if (existing) {
-      if (existing.channel_id !== id || existing.content !== content || existing.card_id !== cardId)
+      if (
+        existing.channel_id !== id ||
+        existing.content !== content ||
+        existing.card_id !== cardId ||
+        existing.image_sha256 !== image?.sha256
+      )
         throw new Error("request_id 已用于其他消息。");
       return structuredClone(existing);
     }
@@ -338,7 +385,12 @@ export class Transport<A extends MaintenanceAgent> {
     const channel = this.bridge.requireOwner(id, sessionId);
     const raced = this.bridge.store.data.outbound.find((o) => o.id === uuid);
     if (raced) {
-      if (raced.channel_id !== id || raced.content !== content || raced.card_id !== cardId)
+      if (
+        raced.channel_id !== id ||
+        raced.content !== content ||
+        raced.card_id !== cardId ||
+        raced.image_sha256 !== image?.sha256
+      )
         throw new Error("request_id 已用于其他消息。");
       return structuredClone(raced);
     }
@@ -351,22 +403,43 @@ export class Transport<A extends MaintenanceAgent> {
         origin_session_id: sessionId,
         content,
         ...(cardId ? { card_id: cardId } : {}),
+        ...(image ? { image_path: image.path, image_sha256: image.sha256 } : {}),
         created_at: Date.now(),
         state: "sending",
       });
     });
+    let attempted = false;
     try {
-      const parts = cardId ? [content] : splitMarkdown(content);
+      let imageKey: string | undefined;
+      if (image) {
+        this.bridge.requireOwner(id, sessionId);
+        if (this.stopped) throw new Error("插件已停止。");
+        const uploaded = await runtime.client.im.image.create({
+          data: { image_type: "message", image: image.bytes },
+        });
+        if (!uploaded?.image_key)
+          throw new Error("图片上传未返回 image_key，请检查 im:resource 权限和图片格式。");
+        imageKey = uploaded.image_key;
+        this.bridge.store.transaction((data) => {
+          data.outbound.find((o) => o.id === uuid)!.image_key = imageKey;
+        });
+      }
+      const parts = cardId || image ? [content] : splitMarkdown(content);
       const messageIds: string[] = [];
       for (const [index, part] of parts.entries()) {
         this.bridge.requireOwner(id, sessionId);
         if (this.stopped) throw new Error("插件已停止。");
+        attempted = true;
         const response = await runtime.client.im.message.create({
           params: { receive_id_type: "open_id" },
           data: {
             receive_id: channel.authorized_open_id,
-            msg_type: cardId ? "interactive" : "post",
-            content: cardId ? part : markdownPost(part),
+            msg_type: image ? "image" : cardId ? "interactive" : "post",
+            content: image
+              ? JSON.stringify({ image_key: imageKey })
+              : cardId
+                ? part
+                : markdownPost(part),
             uuid:
               index === 0
                 ? uuid
@@ -391,11 +464,100 @@ export class Transport<A extends MaintenanceAgent> {
     } catch (error) {
       this.bridge.store.transaction((data) => {
         const item = data.outbound.find((o) => o.id === uuid);
-        if (item) item.state = "uncertain";
+        if (item) {
+          item.state = attempted ? "uncertain" : "failed";
+          item.error = safeError(error);
+        }
+      });
+      this.bridge.reportAlert({
+        source: "feishu",
+        key: `outbound:${uuid}`,
+        channel_ids: [id],
+        message: `机器人${image ? "图片" : "消息"}发送${attempted ? "结果不确定" : "未提交"}。\n请求 ID：${uuid}\n${safeError(error)}\n请核对 feishu_outbound 和手机记录，不要盲目重发。`,
       });
       throw new Error(
-        `${safeError(error)} 发送结果不确定，请检查飞书记录，不要更换 request_id 重发。`,
+        `${safeError(error)} ${attempted ? "发送结果不确定，请检查飞书记录，不要更换 request_id 重发。" : "提交前失败，未发送消息；图片请核对 im:resource 权限、格式和通道，修正后可用新的 request_id 重试。"}`,
       );
+    }
+  }
+
+  syncAlerts() {
+    if (this.stopped) return;
+    if (this.alertsSync) {
+      this.alertsChanged = true;
+      return;
+    }
+    this.alertsChanged = false;
+    clearTimeout(this.alertsRetry);
+    this.alertsSync = this.updateAlerts()
+      .catch(() => {
+        this.bridge.host.warn("feishu: 异常通知未能完成，请查看 feishu_alerts；不会递归发送告警。");
+      })
+      .finally(() => {
+        this.alertsSync = undefined;
+        if (this.stopped) return;
+        if (this.alertsChanged) {
+          this.syncAlerts();
+          return;
+        }
+        if (
+          this.bridge.store.data.alerts?.some(
+            (a) => a.state === "pending" && this.bridge.channel(a.channel_id).enabled,
+          )
+        ) {
+          this.alertsRetry = setTimeout(() => this.syncAlerts(), 60000);
+          this.alertsRetry.unref();
+        }
+      });
+  }
+  private async updateAlerts() {
+    for (const alert of this.bridge.store.data.alerts?.filter((a) => a.state === "pending") ?? []) {
+      if (this.stopped) return;
+      const channel = this.bridge.channel(alert.channel_id);
+      if (!channel.enabled) continue;
+      let attempted = false;
+      try {
+        const runtime = await this.ensure(channel);
+        const current = this.bridge.channel(channel.id);
+        if (this.stopped || !current.enabled) return;
+        if (this.runtimes.get(channel.id) !== runtime)
+          throw new Error("通道已变化，稍后重试通知。");
+        this.bridge.store.transaction((data) => {
+          const item = data.alerts!.find((a) => a.id === alert.id)!;
+          item.state = "sending";
+          delete item.error;
+        });
+        attempted = true;
+        const response = await runtime.client.im.message.create({
+          params: { receive_id_type: "open_id" },
+          data: {
+            receive_id: current.authorized_open_id,
+            msg_type: "text",
+            uuid: alert.id,
+            content: JSON.stringify({
+              text: `[DSH 插件异常 · ${alert.source}]\n${alert.message}\n\n发现时间：${new Date(alert.created_at).toISOString()}\n此消息由插件直接发送，不代表 Agent 已处理或业务已完成。`,
+            }),
+          },
+        });
+        checkResponse(response);
+        if (!response.data?.message_id) throw new Error("通知消息 ID 缺失。");
+        this.bridge.store.transaction((data) => {
+          const item = data.alerts!.find((a) => a.id === alert.id)!;
+          item.state = "sent";
+          item.message_id = response.data!.message_id;
+        });
+      } catch (error) {
+        // DNS/refused connections and explicit API rejection have not accepted a message.
+        const code = record(error) ? error.code : undefined;
+        const rejected =
+          typeof code === "number" ||
+          ["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED"].includes(String(code));
+        this.bridge.store.transaction((data) => {
+          const item = data.alerts!.find((a) => a.id === alert.id)!;
+          item.state = attempted && !rejected ? "uncertain" : "pending";
+          item.error = safeError(error);
+        });
+      }
     }
   }
 
@@ -575,6 +737,12 @@ export class Transport<A extends MaintenanceAgent> {
         });
       } catch {
         this.bridge.host.warn(`feishu: 卡片 ${card.id} 更新失败，已保留更新意图。`);
+        this.bridge.reportAlert({
+          source: "feishu",
+          key: `card-update:${card.id}:${card.revision}`,
+          channel_ids: [channel.id],
+          message: `飞书卡片状态更新失败，已保留更新意图等待重试。\n卡片 ID：${card.id}\n手机显示可能尚未反映实际处理状态。`,
+        });
       }
     }
   }
@@ -584,10 +752,12 @@ export class Transport<A extends MaintenanceAgent> {
     clearTimeout(this.reconnectTimer);
     clearTimeout(this.cardRetry);
     clearTimeout(this.processingRetry);
+    clearTimeout(this.alertsRetry);
     for (const runtime of this.runtimes.values()) runtime.ws?.close({ force: true });
     await this.reconcileChain;
     await this.syncing;
     await this.processingSync;
+    await this.alertsSync;
     for (const runtime of this.runtimes.values()) runtime.ws?.close({ force: true });
     this.runtimes.clear();
   }

@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { normalizeRule } from "./rules.js";
-import { isRecord, validateSessionTitle, type StoreData } from "./types.js";
+import {
+  isRecord,
+  validHandoff,
+  validBindings,
+  validateSessionTitle,
+  type StoreData,
+} from "./types.js";
 
 export class Store {
   readonly file: string;
@@ -34,15 +40,8 @@ export class Store {
           (task.target_mode === "session" && typeof task.target_session_id !== "string") ||
           typeof task.cwd !== "string" ||
           !task.cwd.trim() ||
-          !Array.isArray(task.feishu_bindings) ||
-          task.feishu_bindings.some(
-            (binding: unknown) =>
-              !isRecord(binding) ||
-              typeof binding.channel_id !== "string" ||
-              typeof binding.session_id !== "string" ||
-              !Number.isInteger(binding.revision) ||
-              Number(binding.revision) <= 0,
-          ) ||
+          !validBindings(task.feishu_bindings) ||
+          (task.feishu_handoff !== undefined && !validHandoff(task.feishu_handoff)) ||
           (task.preparing !== undefined &&
             (!isRecord(task.preparing) ||
               typeof task.preparing.session_id !== "string" ||
