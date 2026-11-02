@@ -95,6 +95,162 @@ function fixture() {
 }
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+// Failure modes: a query consumes an event; automatic delivery and explicit claim
+// both win; retries reveal the same payload twice; another Session steals it;
+// a failed disk write returns usable content; restart requeues a consumed event;
+// reaction completion is attributed to the wrong turn or Session.
+test("explicit claim consumes one pending event durably while queries stay read-only", async () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.subscribe();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  const event = f.bridge.events()[0];
+  expect(f.bridge.events()[0].state).toBe("pending");
+  const result = f.bridge.claim(f.channel.id, "A", 5, event.id);
+  expect(result.claimed).toBe(true);
+  if (!result.claimed) throw new Error("expected claim");
+  expect(result.event.text).toBe(f.msg.text);
+  expect(result.event).toMatchObject({ state: "claimed", target_session_id: "A", claimed_turn: 5 });
+  expect(result.event.processing).toMatchObject({ state: "running", session_id: "A", turn: 5 });
+  expect(JSON.parse(readFileSync(f.store.file, "utf8")).events[0].state).toBe("claimed");
+  expect(f.bridge.claim(f.channel.id, "A", 5, event.id)).toMatchObject({
+    claimed: false,
+    state: "claimed",
+  });
+  expect(f.bridge.claim(f.channel.id, "A", 5, event.id)).not.toHaveProperty("event");
+  await f.bridge.dispatch(f.channel.id, f.a);
+  expect(f.deliveries).toHaveLength(0);
+  f.bridge.finishTurn("A", 4, true);
+  expect(f.bridge.events()[0].processing?.state).toBe("running");
+  f.bridge.finishTurn("A", 5, true);
+  expect(f.bridge.events()[0].processing?.state).toBe("completed");
+});
+
+test("claim during automatic delivery preflight prevents later injection", async () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.subscribe();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  let release!: (ready: boolean) => void;
+  f.flush.mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const dispatch = f.bridge.dispatch(f.channel.id, f.a);
+  expect(f.bridge.claim(f.channel.id, "A", 5).claimed).toBe(true);
+  release(true);
+  await dispatch;
+  expect(f.deliveries).toHaveLength(0);
+});
+
+test("automatic delivery that reserved an event excludes a later claim", async () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.subscribe();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  let release!: (ready: boolean) => void;
+  f.flush.mockResolvedValueOnce(true).mockImplementationOnce(
+    () =>
+      new Promise<boolean>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const dispatch = f.bridge.dispatch(f.channel.id, f.a);
+  await settle();
+  expect(f.deliveries).toHaveLength(1);
+  expect(f.bridge.claim(f.channel.id, "A", 5)).toEqual({ claimed: false, reason: "empty" });
+  const explicit = f.bridge.claim(f.channel.id, "A", 5, f.bridge.events()[0].id);
+  expect(explicit).toMatchObject({ claimed: false, state: "dispatching" });
+  expect(explicit).not.toHaveProperty("event");
+  release(true);
+  await dispatch;
+  expect(f.bridge.claim(f.channel.id, "A", 5, f.bridge.events()[0].id)).toMatchObject({
+    claimed: false,
+    state: "delivered",
+  });
+});
+
+test("only the current live owner may claim, and unassigned events remain unclaimable", () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  f.subscribe();
+  const unassigned = f.bridge.events()[0].id;
+  expect(f.bridge.claim(f.channel.id, "A", 5, unassigned)).toMatchObject({
+    claimed: false,
+    state: "unassigned",
+  });
+  f.bridge.receiveMessage(f.channel.id, { ...f.msg, messageId: "om_two" });
+  expect(() => f.bridge.claim(f.channel.id, "B", 5)).toThrow("订阅");
+  f.subscribe("B");
+  expect(() => f.bridge.claim(f.channel.id, "A", 5)).toThrow("订阅");
+  expect(f.bridge.claim(f.channel.id, "B", 5).claimed).toBe(true);
+  expect(f.bridge.claim(f.channel.id, "B", 5)).toEqual({ claimed: false, reason: "empty" });
+  expect(f.bridge.claim(f.channel.id, "B", 5, "missing")).toEqual({
+    claimed: false,
+    reason: "not_found",
+  });
+  expect(() => f.bridge.claim(f.channel.id, "B", 0)).toThrow("轮次");
+  f.agents.delete("B");
+  expect(() => f.bridge.claim(f.channel.id, "B", 5)).toThrow("活动");
+});
+
+test("failed claim persistence returns no content and leaves the event pending", async () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.subscribe();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  const originalTransaction = f.store.transaction.bind(f.store);
+  vi.spyOn(f.store, "transaction").mockImplementationOnce((operation) =>
+    originalTransaction(() => {
+      operation(f.store.data);
+      throw new Error("disk full");
+    }),
+  );
+  expect(() => f.bridge.claim(f.channel.id, "A", 5)).toThrow("disk full");
+  expect(f.bridge.events()[0].state).toBe("pending");
+  await f.bridge.dispatch(f.channel.id, f.a);
+  expect(f.deliveries).toHaveLength(1);
+});
+
+test("claimed events survive restart without automatic redelivery", async () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.subscribe();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  f.bridge.claim(f.channel.id, "A", 5);
+  await f.bridge.close();
+  const reopened = new Store(f.directory);
+  try {
+    expect(reopened.data.events[0]).toMatchObject({
+      state: "claimed",
+      claimed_turn: 5,
+      target_session_id: "A",
+    });
+    expect(reopened.data.events[0].processing?.state).toBe("interrupted");
+  } finally {
+    reopened.close();
+  }
+});
+
+test("oldest pending event is claimed once for both text and card actions", async () => {
+  const f = fixture();
+  f.bridge.kick = () => {};
+  f.subscribe();
+  f.bridge.receiveMessage(f.channel.id, f.msg);
+  const card = f.create();
+  f.bridge.receiveAction(f.channel.id, f.action(card.id));
+  const first = f.bridge.claim(f.channel.id, "A", 5);
+  const second = f.bridge.claim(f.channel.id, "A", 5);
+  expect(first.claimed && first.event.kind).toBe("text");
+  expect(second.claimed && second.event.card_id).toBe(card.id);
+  expect(f.bridge.claim(f.channel.id, "A", 5)).toEqual({ claimed: false, reason: "empty" });
+  await f.bridge.dispatch(f.channel.id, f.a);
+  expect(f.deliveries).toHaveLength(0);
+});
+
 test("unassigned messages stay recorded and are not backfilled on subscription", async () => {
   const f = fixture();
   expect(f.bridge.receiveMessage(f.channel.id, f.msg)).toBe(true);

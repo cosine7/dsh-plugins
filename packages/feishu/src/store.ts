@@ -179,9 +179,23 @@ function validData(value: unknown): value is StoreData {
             (e.processing.turn === undefined || Number.isInteger(e.processing.turn)) &&
             (e.processing.session_id === undefined ||
               typeof e.processing.session_id === "string"))) &&
-        ["pending", "unassigned", "dispatching", "delivered", "uncertain", "expired"].includes(
-          e.state,
-        ),
+        (e.claimed_at === undefined || Number.isFinite(e.claimed_at)) &&
+        (e.claimed_turn === undefined ||
+          (Number.isSafeInteger(e.claimed_turn) && Number(e.claimed_turn) > 0)) &&
+        (e.state !== "claimed" ||
+          (Number.isFinite(e.claimed_at) &&
+            typeof e.target_session_id === "string" &&
+            Number.isSafeInteger(e.claimed_turn) &&
+            Number(e.claimed_turn) > 0)) &&
+        [
+          "pending",
+          "unassigned",
+          "dispatching",
+          "delivered",
+          "claimed",
+          "uncertain",
+          "expired",
+        ].includes(e.state),
     ) &&
     cards.every(
       (c) =>

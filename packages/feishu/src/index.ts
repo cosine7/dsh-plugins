@@ -65,7 +65,7 @@ type Definition = [
   string,
   string,
   ParameterSchemaSpec,
-  (args: Record<string, unknown>, sessionId: string) => unknown,
+  (args: Record<string, unknown>, sessionId: string, agent: Agent) => unknown,
 ];
 
 export function apply(ctx: Context) {
@@ -352,7 +352,7 @@ export function apply(ctx: Context) {
     ],
     [
       "feishu_events",
-      "查看收到的事件记录。unassigned 不自动补投；delivered 仅代表会话接收，uncertain 需核对会话，不可盲目重投。",
+      "只读查看事件记录，不消费、不取消自动投递。若要在当前轮处理 pending 事件，必须先 feishu_claim，只有 claimed=true 才可处理返回内容。delivered/claimed 不等于业务完成；uncertain 需核对，unassigned 不自动补投。",
       {
         channel_id: string("可选通道 ID"),
         state: string("可选事件状态"),
@@ -364,6 +364,27 @@ export function apply(ctx: Context) {
           args.state as string | undefined,
           args.limit as number | undefined,
         ),
+    ],
+    [
+      "feishu_claim",
+      "主动领取一条 pending 事件，在当前轮处理。仅当前订阅根 Session 可调用；省略 event_id 领取最早一条。领取先持久化再返回内容，成功后取消该事件的自动投递；若自动投递已先开始或已领取则 claimed=false，不返回正文，不得重复执行。",
+      {
+        channel_id: channel,
+        event_id: string("可选事件 ID，来自 feishu_events；省略领取最早的待处理事件。"),
+      },
+      (args, current, agent) => {
+        const boundary = agent.session
+          .ownEvents()
+          .findLast((e) => e.type === "turn/start" || e.type === "turn/end");
+        if (boundary?.type !== "turn/start")
+          throw new Error("只能在当前 Session 的执行轮次中主动领取事件。");
+        return bridge.claim(
+          args.channel_id as string,
+          current,
+          boundary.data.turn,
+          args.event_id as string | undefined,
+        );
+      },
     ],
     [
       "feishu_outbound",
@@ -399,7 +420,7 @@ export function apply(ctx: Context) {
                 async execute(args, exec) {
                   if (stopping || exec.signal.aborted || exec.agent !== agent)
                     return { error: "飞书通道不可用或调用已取消。" };
-                  const operation = Promise.resolve().then(() => execute(args, sid(agent)));
+                  const operation = Promise.resolve().then(() => execute(args, sid(agent), agent));
                   running.add(operation);
                   try {
                     return (await operation) as JsonValue;

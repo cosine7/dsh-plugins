@@ -17,6 +17,18 @@ App ID 与 secret 只能由 DSH 凭据服务持有，禁止在聊天中索要/�
 
 由用户选定的 Session 调用 `feishu_subscribe`。文字与卡片点击统一投递给当前订阅者；旧卡片创建者只作为审计信息。没有订阅者时事件仍记录为 unassigned，之后订阅也不会自动补投。所有 Session 可用 `feishu_events`、`feishu_cards`、`feishu_outbound` 查看记录。归档/停止 Session 会解除订阅，应用正常退出保留绑定。
 
+## 查询与领取消息
+
+正常收消息使用自动投递：会话忙时，事件先保存为 pending，空闲后唤醒下一轮。不要持续轮询等待手机回复；没有待处理事件时结束当前轮，让插件按事件唤醒。
+
+当前轮需要主动处理已收到的消息时，调用 `feishu_claim`，提供 channel_id，可选 event_id（省略领取最早一条 pending）。仅当前已订阅的活动根 Session 可领取。**只有返回 claimed=true 才处理 event 正文**；领取先持久化，再通过工具结果返回消息，不另发一条用户消息或新开一轮。文字和卡片点击均可领取，仍须按当前业务条件判断。
+
+`feishu_events` 始终只是只读查询，不改变状态或取消自动投递。即使从它看到了 pending 正文，也不要直接处理，先按事件 ID 调用 feishu_claim。自动投递已开始/完成、已领取、unassigned、expired 或 uncertain 事件均不可领取；claimed=false 不返回正文，不应据此再次执行或向用户回复“你重复投递了”。自动投递与主动领取只能有一方消费同一条事件。
+
+claimed 仅表示已交给该 Session 当前轮处理，不代表业务完成。claimed_at、claimed_turn、target_session_id 保留审计信息；文字的处理表情跟随领取轮次结束。重启或调用结果丢失时不自动重排已领取事件；通过 feishu_events 核对历史与实际副作用后再决定如何处理，不盲目重复领取或执行。
+
+## 发送与处理
+
 使用 `feishu_send_text` 发送 Markdown 富文本，正常使用标题、加粗、列表、链接、代码块和表格，不要为了插件降级成纯文本或额外转义 Markdown。长消息自动拆分，发送记录的 message_ids 包含各段消息；部分发送失败仍视为 uncertain，不换 ID 重发。
 
 使用 `feishu_send_image` 发送本地图片，提供 channel_id、绝对 image_path 和稳定 request_id。插件通过 SDK 上传并发送，不依赖 CLI，不需要自行提取凭据或调用原生接口。支持 JPG/JPEG、PNG、WEBP、GIF、BMP、ICO、TIFF、HEIC，非空且不超过10 MiB，格式与分辨率最终由飞书校验。只允许当前订阅 Session；需要配文时另外调用 feishu_send_text。读取到的同一份图片快照用于指纹和上传，不会在处理期间更换文件内容。相同请求返回既有记录，不重复发送；图片内容变化需使用新的 request_id。上传失败或提交前失败记录 failed，确认修正原因后可用新 ID 重试；一旦尝试提交消息而无法确认结果则记录 uncertain，先核对手机与 feishu_outbound，不能盲目换 ID。平台转换 TIFF/HEIC 时可能改变图片编码。

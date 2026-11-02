@@ -1,6 +1,6 @@
 {
   "name": "@cosine/dsh-feishu",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "为 DeepSeek Harness 桌面版提供飞书双向消息、交互卡片与会话订阅",
   "license": "MIT",

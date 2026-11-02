@@ -12,6 +12,7 @@ import {
   type Host,
   type MaintenanceAgent,
   type AlertInput,
+  type ClaimResult,
 } from "./types.js";
 
 export class Bridge<A extends MaintenanceAgent> {
@@ -462,6 +463,40 @@ export class Bridge<A extends MaintenanceAgent> {
         .filter((e) => (!channelId || e.channel_id === channelId) && (!state || e.state === state))
         .slice(-Math.max(1, Math.min(500, limit))),
     );
+  }
+
+  claim(channelId: string, sessionId: string, turn: number, eventId?: string): ClaimResult {
+    if (this.stopped) throw new Error("飞书通道已停止。");
+    this.requireOwner(channelId, sessionId);
+    if (!this.host.get(sessionId)) throw new Error("只能由已加载的活动根 Session 领取事件。");
+    if (!Number.isSafeInteger(turn) || turn <= 0) throw new Error("领取事件需要当前执行轮次。");
+    const event = this.store.data.events.find(
+      (e) =>
+        e.channel_id === channelId &&
+        (eventId === undefined ? e.state === "pending" : e.id === eventId),
+    );
+    if (!event) return { claimed: false, reason: eventId === undefined ? "empty" : "not_found" };
+    if (event.state !== "pending")
+      return { claimed: false, reason: "not_pending", state: event.state };
+    // No await between the state check and durable commit. The automatic path
+    // rechecks pending after its own async preflight, so only one path can win.
+    const result = this.store.transaction(() => {
+      event.state = "claimed";
+      event.target_session_id = sessionId;
+      event.claimed_at = this.now();
+      event.claimed_turn = turn;
+      if (event.kind === "text")
+        event.processing = {
+          ...event.processing,
+          state: "running",
+          dirty: true,
+          session_id: sessionId,
+          turn,
+        };
+      return { claimed: true as const, event: structuredClone(event) };
+    });
+    this.onProcessingChanged();
+    return result;
   }
 
   kick() {

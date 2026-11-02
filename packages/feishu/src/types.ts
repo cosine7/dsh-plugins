@@ -16,6 +16,7 @@ export type EventState =
   | "unassigned"
   | "dispatching"
   | "delivered"
+  | "claimed"
   | "uncertain"
   | "expired";
 export interface InboundEvent {
@@ -34,6 +35,8 @@ export interface InboundEvent {
   action_id?: string;
   target_session_id?: string;
   delivered_at?: number;
+  claimed_at?: number;
+  claimed_turn?: number;
   processing?: {
     state: "received" | "running" | "completed" | "failed" | "interrupted";
     turn?: number;
@@ -43,6 +46,10 @@ export interface InboundEvent {
     dirty: boolean;
   };
 }
+
+export type ClaimResult =
+  | { claimed: true; event: InboundEvent }
+  | { claimed: false; reason: "empty" | "not_found" | "not_pending"; state?: EventState };
 
 export interface Choice {
   id: string;

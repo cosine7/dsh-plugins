@@ -126,7 +126,7 @@ try {
   };
   assert.equal(
     a.agent.ctx.tools.schemas(a.agent).filter((t) => t.name.startsWith("feishu_")).length,
-    20,
+    21,
   );
   assert.equal((await invoke(a.agent, "feishu_status")).length, 0);
   assert.equal((await ctx.skills.get("dsh-feishu")).name, "dsh-feishu");
@@ -290,6 +290,47 @@ try {
       (e) => e.message_id === "om_processing" && e.processing?.emoji === "Typing",
     ),
   );
+  // A busy root can consume a pending event through the tool result; it must
+  // never receive that event again as an automatic followup after this turn.
+  await dispatcher.invoke(
+    {
+      schema: "2.0",
+      header: { event_type: "im.message.receive_v1", event_id: "claim_test" },
+      event: {
+        sender: { sender_type: "user", sender_id: { open_id: "ou_host" } },
+        message: {
+          message_type: "text",
+          message_id: "om_claim",
+          chat_id: "oc_host",
+          chat_type: "p2p",
+          content: '{"text":"claim from current turn"}',
+        },
+      },
+    },
+    { needCheck: false },
+  );
+  const pending = (await invoke(b.agent, "feishu_events", { state: "pending" })).find(
+    (e) => e.message_id === "om_claim",
+  );
+  assert(pending, "query did not consume the pending event");
+  const claimed = await invoke(b.agent, "feishu_claim", {
+    channel_id: channel.id,
+    event_id: pending.id,
+  });
+  assert.equal(claimed.claimed, true);
+  assert.equal(claimed.event.state, "claimed");
+  assert.equal(claimed.event.text, "claim from current turn");
+  assert.equal(claimed.event.processing.turn, claimed.event.claimed_turn);
+  const retry = await invoke(b.agent, "feishu_claim", {
+    channel_id: channel.id,
+    event_id: pending.id,
+  });
+  assert.equal(retry.claimed, false);
+  assert.equal(retry.event, undefined, "retry does not return consumable content");
+  const diskState = JSON.parse(
+    fs.readFileSync(path.join(root, "storages/cosine-feishu/state.json"), "utf8"),
+  );
+  assert.equal(diskState.events.find((e) => e.id === pending.id).state, "claimed");
   releaseText();
   await b.agent.whenIdle();
   await wait(async () =>
@@ -300,6 +341,26 @@ try {
         e.processing.emoji === "CrossMark",
     ),
   );
+  await wait(async () =>
+    (await invoke(b.agent, "feishu_events")).some(
+      (e) =>
+        e.id === pending.id &&
+        e.processing?.state === "failed" &&
+        e.processing.emoji === "CrossMark",
+    ),
+  );
+  assert(
+    !b.agent.session
+      .ownEvents()
+      .some(
+        (e) =>
+          e.type === "agent/inbox/spliced" &&
+          e.data.inserted?.some(
+            (m) => m.source.kind === plugin.name && m.source.eventId === pending.id,
+          ),
+      ),
+    "claimed event must not be injected into a later turn",
+  );
   await ctx.parallel("workspace/session-stop", { sessionId: "feishu-B" });
   assert(!(await invoke(a.agent, "feishu_status"))[0].session_id);
   await fork.dispose();
@@ -309,7 +370,7 @@ try {
   await b.dispose();
   assert.equal(errors.length, 0, errors.join("\n"));
   console.log(
-    "DSH desktop host integration passed: credentials, 18 tools, subscription, callbacks, deduplication, durable inbox, Markdown post, real claimed/turn-end reactions, archive and disposal. Feishu network simulated; no trading agent used.",
+    "DSH desktop host integration passed: credentials, 21 tools, subscription, callbacks, deduplication, durable inbox, explicit event claim without later delivery, Markdown post, real claimed/turn-end reactions, archive and disposal. Feishu network simulated; no trading agent used.",
   );
 } finally {
   release?.();
