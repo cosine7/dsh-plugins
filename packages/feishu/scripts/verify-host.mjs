@@ -62,6 +62,8 @@ try {
     "dsh-skill",
   ])
     await ctx.plugin((await load(name)).default, {}).await();
+  // Native execution is a separate scoped plugin starting with DSH 0.2.2.
+  await ctx.plugin(await load("dsh-tool-executor-native")).await();
   // Exercise the host's one-shot migration without reading or changing user credentials.
   const credentialsFile = path.join(root, ".credentials.yaml");
   fs.writeFileSync(
@@ -97,29 +99,26 @@ try {
       compression: "none",
     })
     .await();
-  await ctx
-    .plugin((await load("dsh-agent-loop")).default, { agents: [], maxParallelToolCalls: 1 })
-    .await();
+  await ctx.plugin((await load("dsh-agent-loop")).default, { agents: [] }).await();
   const plugin = await import("../dist/index.js");
   const fork = ctx.plugin(plugin);
   await fork.await();
   const a = await ctx.agents.create({
     sessionId: "feishu-A",
-    options: { provider: "test", model: "test" },
+    agentOptions: { provider: "test", model: "test" },
     meta: { cwd: root },
   });
   const b = await ctx.agents.create({
     sessionId: "feishu-B",
-    options: { provider: "test", model: "test" },
+    agentOptions: { provider: "test", model: "test" },
   });
   const invoke = async (agent, name, args = {}) => {
-    const result = await agent.ctx.tools.execute({
-      name,
-      arguments: args,
-      callId: randomUUID(),
+    const batch = await agent.ctx.tools.execute({
+      calls: [{ type: "tool-call", id: randomUUID(), name, arguments: JSON.stringify(args) }],
       agent,
       signal: new AbortController().signal,
     });
+    const result = batch.results[0].result;
     assert.equal(result.isError, false, name);
     assert(!result.value.error, JSON.stringify(result.value));
     return result.value;

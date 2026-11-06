@@ -2,6 +2,7 @@
 export async function installSessionServices(ctx, load, root) {
   for (const [name, config] of [
     ["dsh-typert-registry", {}],
+    ["dsh-fs-local", {}],
     ["dsh-storage", {}],
     ["dsh-storage-json", { root: `${root}/storages` }],
     ["dsh-storage-domain", { backend: "json" }],
@@ -19,7 +20,7 @@ export async function installSessionServices(ctx, load, root) {
       throw new Error("No full text index in this isolated check");
     }
   }
-  new Query(ctx);
+  await ctx.plugin(Query).await();
   // Without an explicit title, plugin-source prompts must not trigger human-prompt naming.
   await ctx
     .plugin((await load("dsh-session-title")).default, {
@@ -44,8 +45,9 @@ export async function installSessionServices(ctx, load, root) {
   });
   ctx.provide("fileUploads", { registerAgentResolver: () => () => {} });
   const { default: RemoteAccess } = await load("dsh-api-remote-access");
-  new RemoteAccess(ctx);
+  await ctx.plugin(RemoteAccess).await();
+  await ctx.plugin((await load("dsh-api-gateway")).default, {}).await();
   const { default: SessionController } = await load("dsh-api-session-controller");
-  new SessionController(ctx, {});
+  await ctx.plugin(SessionController, {}).await();
   return ctx.workspaceRegistry.create(root);
 }

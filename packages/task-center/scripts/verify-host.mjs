@@ -43,6 +43,8 @@ try {
   ]) {
     await ctx.plugin((await load(name)).default, {}).await();
   }
+  // Native execution is a separate scoped plugin starting with DSH 0.2.2.
+  await ctx.plugin(await load("dsh-tool-executor-native")).await();
   // An inert LLM prevents network requests while exercising real inbox delivery.
   await ctx
     .plugin(
@@ -62,20 +64,18 @@ try {
       compression: "none",
     })
     .await();
-  await ctx
-    .plugin((await load("dsh-agent-loop")).default, { agents: [], maxParallelToolCalls: 1 })
-    .await();
+  await ctx.plugin((await load("dsh-agent-loop")).default, { agents: [] }).await();
   const workspace = await installSessionServices(ctx, load, root);
   const pluginFork = ctx.plugin(plugin);
   await pluginFork.await();
   const a = await ctx.agents.create({
     sessionId: "compat-A",
-    options: { provider: "test", model: "test" },
+    agentOptions: { provider: "test", model: "test" },
     meta: { cwd: root },
   });
   const b = await ctx.agents.create({
     sessionId: "compat-B",
-    options: { provider: "test", model: "test" },
+    agentOptions: { provider: "test", model: "test" },
   });
   assert.equal(
     a.agent.ctx.tools.schemas(a.agent).filter((tool) => tool.name.startsWith("task_center_"))
@@ -83,14 +83,14 @@ try {
     8,
   );
   const invoke = async (agent, name, args = {}) => {
-    const result = await agent.ctx.tools.execute({
-      name,
-      arguments: args,
-      callId: randomUUID(),
+    const batch = await agent.ctx.tools.execute({
+      calls: [{ type: "tool-call", id: randomUUID(), name, arguments: JSON.stringify(args) }],
       agent,
       signal: new AbortController().signal,
     });
+    const result = batch.results[0].result;
     assert.equal(result.isError, false, `${name}: ${JSON.stringify(result)}`);
+    assert(!result.value.error, `${name}: ${JSON.stringify(result.value)}`);
     return result.value;
   };
   assert.equal((await invoke(a.agent, "task_center_list")).length, 0);
@@ -295,7 +295,7 @@ try {
     const cold = await ctx.agents.create({
       sessionId: "cold-target",
       meta: { cwd: root },
-      options: { provider: "test", model: "test" },
+      agentOptions: { provider: "test", model: "test" },
     });
     const coldId = cold.agent.id;
     const coldTask = await invoke(b.agent, "task_center_create", {
