@@ -66,8 +66,21 @@ try {
     .await();
   await ctx.plugin((await load("dsh-agent-loop")).default, { agents: [] }).await();
   const workspace = await installSessionServices(ctx, load, root);
+  // Failure modes: removed roots() breaks mounting; list() alone exposes tools
+  // to children; filtering parentSession also hides ordinary historical forks.
+  const existingChild = await ctx.agents.create({
+    sessionId: "existing-child",
+    agentOptions: { provider: "test", model: "test" },
+    meta: { origin: "subagent", parentSession: "compat-A", delegationDepth: 1 },
+  });
   const pluginFork = ctx.plugin(plugin);
   await pluginFork.await();
+  assert(
+    !existingChild.agent.ctx.tools
+      .schemas(existingChild.agent)
+      .some((t) => t.name.startsWith("task_center_")),
+  );
+  await existingChild.dispose();
   const a = await ctx.agents.create({
     sessionId: "compat-A",
     agentOptions: { provider: "test", model: "test" },
@@ -376,6 +389,25 @@ try {
   } finally {
     await feishu.close();
   }
+  const child = await ctx.agents.create({
+    sessionId: "late-child",
+    agentOptions: { provider: "test", model: "test" },
+    meta: { origin: "subagent", parentSession: "compat-B", delegationDepth: 1 },
+  });
+  const ordinaryFork = await ctx.agents.create({
+    sessionId: "ordinary-fork",
+    agentOptions: { provider: "test", model: "test" },
+    meta: { parentSession: "compat-B" },
+  });
+  assert(
+    !child.agent.ctx.tools.schemas(child.agent).some((t) => t.name.startsWith("task_center_")),
+  );
+  assert.equal((await invoke(ordinaryFork.agent, "task_center_list")) instanceof Array, true);
+  await child.dispose();
+  await ordinaryFork.dispose();
+  console.log(
+    "DSH Agent list: existing/new subagents excluded; ordinary historical fork retains tools.",
+  );
   await pluginFork.dispose();
   assert.equal(fs.existsSync(path.join(root, "storages/cosine-task-center/owner.lock")), false);
   const tools = a.agent.ctx.tools.schemas(a.agent);

@@ -69,6 +69,8 @@ type Definition = [
 ];
 
 export function apply(ctx: Context) {
+  const sessionAgents = () =>
+    ctx.agents.list().filter((agent) => agent.session.header.origin !== "subagent");
   let archived = (_id: string) => false;
   ctx.inject(["workspaceRegistry"], (workspaceCtx) => {
     archived = (id) =>
@@ -78,9 +80,7 @@ export function apply(ctx: Context) {
   try {
     bridge = new Bridge(new Store(join(resolveDshHome(), "storages", name)), {
       get: (id) =>
-        archived(id)
-          ? undefined
-          : ctx.agents.roots().find((a) => String(a.session.id ?? a.id) === id),
+        archived(id) ? undefined : sessionAgents().find((a) => String(a.session.id ?? a.id) === id),
       flush: (agent) => ctx.sessions.flush(agent.session),
       detached: (operation) => ctx.agents.withoutInitiator(operation),
       warn: (message) => ctx.logger.warn(message),
@@ -118,7 +118,7 @@ export function apply(ctx: Context) {
       {},
       (_args, current) => ({
         current_session_id: current,
-        sessions: ctx.agents.roots().map((a) => ({ session_id: sid(a), status: a.status })),
+        sessions: sessionAgents().map((a) => ({ session_id: sid(a), status: a.status })),
       }),
     ],
     [
@@ -402,7 +402,7 @@ export function apply(ctx: Context) {
   const running = new Set<Promise<unknown>>();
   let stopping = false;
   const mount = (agent: Agent) => {
-    if (stopping || mounted.has(agent) || !ctx.agents.roots().includes(agent)) return;
+    if (stopping || mounted.has(agent) || !sessionAgents().includes(agent)) return;
     const dispose = agent.ctx.effect(() => {
       const disposers: (() => unknown)[] = [];
       try {
@@ -505,7 +505,7 @@ export function apply(ctx: Context) {
           transport.reconnect();
       }),
     ];
-    for (const agent of ctx.agents.roots()) mount(agent);
+    for (const agent of sessionAgents()) mount(agent);
     bridge.expireCards();
     bridge.kick();
     transport.syncProcessing();

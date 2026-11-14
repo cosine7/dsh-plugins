@@ -29,6 +29,7 @@ docs(repo): simplify repository introduction and installation guide
 
 - 使用 TypeScript；根目录工具依赖直接声明版本，插件之间统一的 DSH 依赖使用 catalog，插件专属依赖在子包直接声明版本。
 - 普通工具和库使用 `^` 版本范围，DSH 相关开发依赖固定版本；提交锁文件以保证安装可复现。
+- 根目录及插件的 `engines.node` 与当前适配的 DSH 官方最低要求保持一致，不因普通依赖升级或开发机 Node 更新而自行提高；开发运行时由 `devEngines.runtime` 单独管理，桌面端实际运行时由 DSH 提供。
 - 使用 Vitest 测试 TypeScript 源码；保留真实桌面宿主集成检查，验证构建产物的加载和会话投递。
 - 根据变更运行必要检查。涉及测试框架、构建或运行时代码时执行 `pnpm check`；涉及宿主行为时再运行对应插件的真实宿主检查。
 - `pnpm install` 自动安装 Git 钩子；每次提交前运行 `pnpm check`。格式检查失败时先修正再提交，不跳过钩子。

@@ -2,7 +2,7 @@
 
 为 DeepSeek Harness 桌面版提供持久化定时任务与跨会话任务管理。到期时准备执行会话，再把任务交给 Agent。
 
-包名 `@cosine/dsh-task-center`，当前适配桌面版 DSH `0.2.2-rc.1`，Node.js 最低要求 `24.9.0`。可与官方 Schedule 插件同时使用，工具名称以 `task_center_` 开头。
+包名 `@cosine/dsh-task-center`，当前适配桌面版 DSH `0.2.2-rc.3`，Node.js 最低要求 `24.9.0`。可与官方 Schedule 插件同时使用，工具名称以 `task_center_` 开头。
 
 ## 能力
 

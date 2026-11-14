@@ -97,13 +97,15 @@ const ruleSchema: ParameterPropertySpec = {
 };
 
 export function apply(ctx: Context) {
+  const sessionAgents = () =>
+    ctx.agents.list().filter((agent) => agent.session.header.origin !== "subagent");
   const routing = sessionRouting(ctx);
   let center: TaskCenter<Agent>;
   try {
     const store = new Store(join(resolveDshHome(), "storages", "cosine-task-center"));
     center = new TaskCenter(store, {
       ...routing,
-      get: (id) => ctx.agents.roots().find((a) => String(a.session.id ?? a.id) === id),
+      get: (id) => sessionAgents().find((a) => String(a.session.id ?? a.id) === id),
       flush: (agent) => ctx.sessions.flush(agent.session),
       detached: (fn) => ctx.agents.withoutInitiator(fn),
       warn: (text) => ctx.logger.warn(text),
@@ -292,7 +294,7 @@ export function apply(ctx: Context) {
   const running = new Set<Promise<unknown>>();
   let stopping = false;
   const mount = (agent: Agent) => {
-    if (stopping || mounted.has(agent) || !ctx.agents.roots().includes(agent)) return;
+    if (stopping || mounted.has(agent) || !sessionAgents().includes(agent)) return;
     const dispose = agent.ctx.effect(() => {
       const disposers: (() => unknown)[] = [];
       try {
@@ -363,7 +365,7 @@ export function apply(ctx: Context) {
     // Schedules belong to the task, not the Session's archive lifecycle.
     const stopSession = ctx.on("workspace/session-stop", () => center.kick());
     ctx.on("agent/disposed", () => center.kick());
-    for (const agent of ctx.agents.roots()) mount(agent);
+    for (const agent of sessionAgents()) mount(agent);
     center.kick();
     return async () => {
       stopping = true;

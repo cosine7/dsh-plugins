@@ -100,9 +100,22 @@ try {
     })
     .await();
   await ctx.plugin((await load("dsh-agent-loop")).default, { agents: [] }).await();
+  // Failure modes: roots() is absent; unfiltered list() mounts children;
+  // ordinary forks with parentSession must still be allowed to subscribe.
+  const existingChild = await ctx.agents.create({
+    sessionId: "existing-child",
+    agentOptions: { provider: "test", model: "test" },
+    meta: { origin: "subagent", parentSession: "feishu-A", delegationDepth: 1 },
+  });
   const plugin = await import("../dist/index.js");
   const fork = ctx.plugin(plugin);
   await fork.await();
+  assert(
+    !existingChild.agent.ctx.tools
+      .schemas(existingChild.agent)
+      .some((t) => t.name.startsWith("feishu_")),
+  );
+  await existingChild.dispose();
   const a = await ctx.agents.create({
     sessionId: "feishu-A",
     agentOptions: { provider: "test", model: "test" },
@@ -362,6 +375,32 @@ try {
   );
   await ctx.parallel("workspace/session-stop", { sessionId: "feishu-B" });
   assert(!(await invoke(a.agent, "feishu_status"))[0].session_id);
+  const child = await ctx.agents.create({
+    sessionId: "late-child",
+    agentOptions: { provider: "test", model: "test" },
+    meta: { origin: "subagent", parentSession: "feishu-A", delegationDepth: 1 },
+  });
+  const ordinaryFork = await ctx.agents.create({
+    sessionId: "ordinary-fork",
+    agentOptions: { provider: "test", model: "test" },
+    meta: { parentSession: "feishu-A" },
+  });
+  assert(!child.agent.ctx.tools.schemas(child.agent).some((t) => t.name.startsWith("feishu_")));
+  const listed = (await invoke(ordinaryFork.agent, "feishu_sessions")).sessions.map(
+    (s) => s.session_id,
+  );
+  assert(listed.includes("ordinary-fork"));
+  assert(!listed.includes("late-child"));
+  const forkSubscription = await invoke(ordinaryFork.agent, "feishu_subscribe", {
+    channel_id: channel.id,
+    revision: (await invoke(a.agent, "feishu_status"))[0].revision,
+  });
+  assert.equal(forkSubscription.session_id, "ordinary-fork");
+  await child.dispose();
+  await ordinaryFork.dispose();
+  console.log(
+    "DSH Agent list: existing/new subagents excluded; ordinary historical fork can subscribe.",
+  );
   await fork.dispose();
   assert(!fs.existsSync(path.join(root, "storages/cosine-feishu/owner.lock")));
   assert(!a.agent.ctx.tools.schemas(a.agent).some((t) => t.name.startsWith("feishu_")));

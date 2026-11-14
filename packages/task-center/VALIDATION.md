@@ -1,5 +1,13 @@
 # 验证记录
 
+## DSH 0.2.2-rc.3 适配（2026-11-14）
+
+- 本机桌面宿主已升级至0.2.2-rc.3；DSH开发/peer依赖及锁文件同步固定该版本，任务中心升级至0.6.2。Cordis仍为4.1.0，开发Node仍为24.22.2，Electron内置Node仍为24.21.0。
+- 新宿主删除AgentRegistry.roots()及注册表运行时父子归属接口。先在真实宿主检查中列出失败方式、加入回归断言，并复现旧构建在插件加载时抛出roots不是函数；再按[官方迁移指南](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/docs/upgrade-guide/v0.2.1-rc.3/subagent-runtime-ownership/guide.zh.md)使用list()并筛掉header.origin为subagent的实例，统一用于工具挂载和投递目标查询。普通历史fork即使保留parentSession也能正常使用，插件加载前已有及之后新建的子代理均不获得任务中心工具。
+- 同时核对Session.append新增批量重载、工具结构化错误和归档工作树调整：插件不替换append、不依赖旧错误分类或工作树服务；现有Session Controller、标题、flush与followup接口可继续使用。
+- pnpm check通过83项测试及类型、lint、格式、构建；两套真实0.2.2-rc.3桌面宿主检查通过，任务中心覆盖定时与持久化投递、冷恢复、归档/缺失替代、标题、工作区和可选飞书转交，并新增普通fork与子代理隔离验证。检查使用隔离DSH_HOME、无网络模型与模拟飞书，不操作真实交易会话；存储格式及用户数据无需转换。
+- 随后按要求核对并升级全部非DSH直接依赖：pnpm12.18.0、@types/node26.6.6、oxfmt0.78.0、oxlint1.93.0、oxlint-tsgolint7.0.2007、tsdown0.23.7、Vitest5.1.0、cron-parser5.10.5；其他直接依赖已是最新稳定版，锁文件同步刷新。升级后再次通过pnpm check及两套宿主检查。核对[当前宿主的官方声明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/package.json)，根目录及两个插件engines.node继续保持>=24.9.0，不随开发工具升级提高宿主门槛；devEngines.runtime保留^24.22.2。
+
 ## DSH 0.2.2-rc.1 与 Node 24 更新（2026-11-06）
 
 - 根据本机安装包及[官方发行说明](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.1)核对宿主0.2.2-rc.1、Cordis4.1.0和Electron Node24.21.0。所有直接DSH开发/peer依赖固定对齐新宿主，Cordis开发依赖固定4.1.0、peer为^4.1.0；插件0.6.1。根及子包engines.node与官方要求对齐为>=24.9.0。
